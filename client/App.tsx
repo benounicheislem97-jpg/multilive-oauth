@@ -21,6 +21,7 @@ const NETWORKS: { id: Network; name: string; color: string; icon: React.Componen
 const LIMIT = 1200;
 const STORE = 'multilive.simulation.usage.v1';
 const CONNECTION_STORE = 'multilive.connections.v1';
+const CLIENT_ID_STORE = 'multilive.pwa.client.v1';
 const AUTH_BASE = 'https://multilive-oauth.onrender.com';
 const day = () => { const d = new Date(); return [d.getFullYear(), d.getMonth() + 1, d.getDate()].join('-'); };
 const clock = (n: number) => Math.floor(n / 60).toString().padStart(2, '0') + ':' + Math.floor(n % 60).toString().padStart(2, '0');
@@ -54,6 +55,14 @@ function StudioApp() {
     AsyncStorage.getItem(CONNECTION_STORE).then(raw => {
       if (raw) setConnections(JSON.parse(raw));
     }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    void syncWebConnections();
+    const listener = AppState.addEventListener('change', state => { if (state === 'active') void syncWebConnections(); });
+    const onFocus = () => { void syncWebConnections(); };
+    window.addEventListener('focus', onFocus);
+    return () => { listener.remove(); window.removeEventListener('focus', onFocus); };
   }, []);
   useEffect(() => {
     if (Platform.OS !== 'web') return;
@@ -105,11 +114,7 @@ function StudioApp() {
       else Alert.alert('Caméra non autorisée', 'Tu peux continuer la simulation sans caméra, ou autoriser la caméra dans les réglages du téléphone.');
     } catch { Alert.alert('Caméra indisponible', 'La simulation reste utilisable sans caméra.'); }
   }
-  async function completeConnection(handoff: string, requestedNetwork: Network | null) {
-    try {
-      const response = await fetch(`${AUTH_BASE}/api/mobile/exchange?code=${encodeURIComponent(handoff)}`);
-      const data = await response.json();
-      if (!response.ok || !data.connections) throw new Error(data.error || 'Compte non vérifié');
+  async function saveConnectionResult(data: any) {
       const stored = await AsyncStorage.getItem(CONNECTION_STORE);
       const previous: Connections = stored ? JSON.parse(stored) : connections;
       const updated: Connections = data.platform === 'tiktok'
@@ -117,6 +122,32 @@ function StudioApp() {
         : { ...previous, facebook: Boolean(data.connections.facebook), instagram: data.connections.instagram || [] };
       setConnections(updated);
       await AsyncStorage.setItem(CONNECTION_STORE, JSON.stringify(updated));
+      return updated;
+  }
+  async function webClientId() {
+    const saved = await AsyncStorage.getItem(CLIENT_ID_STORE);
+    if (saved) return saved;
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    const created = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+    await AsyncStorage.setItem(CLIENT_ID_STORE, created);
+    return created;
+  }
+  async function syncWebConnections() {
+    try {
+      const clientId = await webClientId();
+      const response = await fetch(`${AUTH_BASE}/api/mobile/status?client_id=${encodeURIComponent(clientId)}`);
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.connections) await saveConnectionResult(data);
+    } catch {}
+  }
+  async function completeConnection(handoff: string, requestedNetwork: Network | null) {
+    try {
+      const response = await fetch(`${AUTH_BASE}/api/mobile/exchange?code=${encodeURIComponent(handoff)}`);
+      const data = await response.json();
+      if (!response.ok || !data.connections) throw new Error(data.error || 'Compte non vérifié');
+      const updated = await saveConnectionResult(data);
       const network = requestedNetwork || data.platform as Network;
       if (network) setSelected(current => ({ ...current, [network]: true }));
       setScreen('home');
@@ -127,7 +158,9 @@ function StudioApp() {
   }
   async function connectNetwork(network: Network) {
     const route = network === 'facebook' ? 'meta' : network;
-    const returnUrl = Platform.OS === 'web' ? `${window.location.origin}/auth/connected` : ExpoLinking.createURL('auth/connected');
+    const returnUrl = Platform.OS === 'web'
+      ? `${window.location.origin}/auth/connected?client_id=${encodeURIComponent(await webClientId())}`
+      : ExpoLinking.createURL('auth/connected');
     const url = `${AUTH_BASE}/oauth/${route}?return_to=${encodeURIComponent(returnUrl)}`;
     setConnecting(network);
     if (Platform.OS === 'web') {

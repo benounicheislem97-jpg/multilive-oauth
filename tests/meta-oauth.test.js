@@ -126,13 +126,17 @@ test('mobile OAuth returns a one-time verified connection handoff', async () => 
 
 test('PWA OAuth returns only to the hosted application', async () => {
   const app = harness();
-  const returnTo = 'https://example.test/auth/connected';
+  const clientId = 'test_client_12345678901234567890';
+  const returnTo = 'https://example.test/auth/connected?client_id=' + clientId;
   const login = await app.request('/oauth/meta?return_to=' + encodeURIComponent(returnTo));
   const auth = new URL(login.headers.Location);
   const body = new URLSearchParams({ code: 'pwa-code', state: auth.searchParams.get('state') }).toString();
   const callback = await app.request('/auth/meta/callback/', login.headers['Set-Cookie'].split(';')[0], body);
   const result = await app.request(callback.headers.Location, callback.headers['Set-Cookie'].split(';')[0]);
-  assert.match(result.body, /https:\/\/example\.test\/auth\/connected\?handoff=/);
+  assert.match(result.body, /https:\/\/example\.test\/auth\/connected\?client_id=test_client_12345678901234567890(?:&|&amp;)handoff=/);
+  const synced = await app.request('/api/mobile/status?client_id=' + clientId);
+  assert.equal(synced.status, 200);
+  assert.equal(JSON.parse(synced.body).connections.facebook, true);
 
   const rejected = await app.request('/oauth/meta?return_to=' + encodeURIComponent('https://evil.test/auth/connected'));
   const rejectedState = new URL(rejected.headers.Location).searchParams.get('state');

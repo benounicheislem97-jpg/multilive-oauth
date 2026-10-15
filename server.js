@@ -96,9 +96,22 @@ function connectionStatus(tokens = {}) {
   return { facebook: Boolean(tokens.access_token), instagram: tokens.instagramAccounts || [], tiktok: false };
 }
 
+function validClientId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{20,100}$/.test(value);
+}
+
+function pwaConnectionFile(clientId) {
+  return path.join(PRIVATE_DIR, `pwa-${clientId}.json`);
+}
+
 function issueMobileHandoff(returnTo, result) {
   const safeReturn = safeMobileReturn(returnTo);
   if (!safeReturn) return '';
+  const clientId = new URL(safeReturn).searchParams.get('client_id');
+  if (validClientId(clientId)) {
+    fs.mkdirSync(PRIVATE_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(pwaConnectionFile(clientId), JSON.stringify({ result, expiresAt: Date.now() + 7 * 86400000 }), { mode: 0o600 });
+  }
   const code = randomString(32);
   mobileHandoffs.set(code, { result, expiresAt: Date.now() + 120000 });
   setTimeout(() => mobileHandoffs.delete(code), 120000).unref();
@@ -142,6 +155,18 @@ const server = http.createServer(async (req, res) => {
     mobileHandoffs.delete(code);
     if (!handoff || handoff.expiresAt < Date.now()) return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Retour expiré' }));
     return send(res, 200, 'application/json; charset=utf-8', JSON.stringify(handoff.result));
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/mobile/status') {
+    const clientId = url.searchParams.get('client_id');
+    if (!validClientId(clientId)) return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Appareil invalide' }));
+    try {
+      const saved = JSON.parse(fs.readFileSync(pwaConnectionFile(clientId), 'utf8'));
+      if (!saved.result || saved.expiresAt < Date.now()) return send(res, 404, 'application/json; charset=utf-8', JSON.stringify({ error: 'Aucune connexion' }));
+      return send(res, 200, 'application/json; charset=utf-8', JSON.stringify(saved.result));
+    } catch {
+      return send(res, 404, 'application/json; charset=utf-8', JSON.stringify({ error: 'Aucune connexion' }));
+    }
   }
 
   if (req.method === 'GET' && url.pathname === '/api/connections') {

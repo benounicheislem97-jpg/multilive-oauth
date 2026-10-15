@@ -1,0 +1,13 @@
+{
+  "name": "multistream-mobile-preview",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local MultiLive OAuth prototype",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

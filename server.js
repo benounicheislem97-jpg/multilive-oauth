@@ -76,7 +76,7 @@ function passwordHash(password, salt) {
 }
 
 function publicUser(user) {
-  return { id: user.id, name: user.name, email: user.email, plan: user.plan || 'development', payments: user.payments || [], createdAt: user.createdAt };
+  return { id: user.id, name: user.name, email: user.email, plan: user.plan || 'development', subscription: user.subscription || { plan: user.plan || 'development', status: 'development', startedAt: user.createdAt, autoRenew: false }, payments: user.payments || [], createdAt: user.createdAt };
 }
 
 function authUser(req) {
@@ -202,7 +202,8 @@ const server = http.createServer(async (req, res) => {
       const users = readUsers();
       if (users.some(user => user.email === email)) return send(res, 409, 'application/json; charset=utf-8', JSON.stringify({ error: 'Un compte utilise déjà cet e-mail.' }));
       const salt = crypto.randomBytes(16).toString('hex');
-      const user = { id: randomString(16), name, email, salt, passwordHash: passwordHash(password, salt), plan: 'development', payments: [], createdAt: new Date().toISOString() };
+      const createdAt = new Date().toISOString();
+      const user = { id: randomString(16), name, email, salt, passwordHash: passwordHash(password, salt), plan: 'development', subscription: { plan: 'development', status: 'development', startedAt: createdAt, autoRenew: false }, payments: [], createdAt };
       users.push(user); writeUsers(users);
       return send(res, 201, 'application/json; charset=utf-8', JSON.stringify({ token: createAuthSession(user), user: publicUser(user) }));
     } catch { return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Données invalides.' })); }

@@ -3,10 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const querystring = require('querystring');
+const os = require('os');
 
 const PORT = Number(process.env.PORT || 4320);
 const ROOT = __dirname;
-const PRIVATE_DIR = path.resolve(ROOT, '../../work');
+const PRIVATE_DIR = process.env.RENDER ? path.join(os.tmpdir(), 'multilive-private') : path.resolve(ROOT, '../../work');
 const CONFIG_FILE = path.join(PRIVATE_DIR, 'tiktok-oauth-config.json');
 const TOKEN_FILE = path.join(PRIVATE_DIR, 'tiktok-oauth-tokens.json');
 const META_CONFIG_FILE = path.join(PRIVATE_DIR, 'meta-oauth-config.json');
@@ -15,6 +16,25 @@ const REDIRECT_URI = `http://127.0.0.1:${PORT}/auth/tiktok/callback/`;
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${PORT}`).replace(/\/$/, '');
 const META_REDIRECT_URI = `${PUBLIC_BASE_URL}/auth/meta/callback/`;
 const pending = new Map();
+const metaExchanges = new Map();
+const secureCookie = PUBLIC_BASE_URL.startsWith('https:') ? '; Secure' : '';
+
+function signedValue(value, secret) {
+  return `${value}.${crypto.createHmac('sha256', secret).update(value).digest('base64url')}`;
+}
+
+function validSignedValue(value, secret) {
+  if (!value || !secret) return false;
+  const split = value.lastIndexOf('.');
+  if (split < 1) return false;
+  const expected = Buffer.from(signedValue(value.slice(0, split), secret));
+  const actual = Buffer.from(value);
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
 
 function cookies(req) {
   const header = req.headers.cookie || '';
@@ -97,38 +117,74 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/oauth/meta') {
     const config = readMetaConfig();
     if (!config) { res.writeHead(302, { Location: '/setup/meta' }); return res.end(); }
-    const state = randomString(32);
-    pending.set(`meta:${state}`, { createdAt: Date.now() });
+    const state = signedValue(`${Date.now()}.${randomString(32)}`, config.app_secret);
     const params = new URLSearchParams({ client_id: config.app_id, redirect_uri: META_REDIRECT_URI, state, response_type: 'code', scope: 'public_profile,email' });
     res.writeHead(302, {
       Location: `https://www.facebook.com/dialog/oauth?${params}`,
-      'Set-Cookie': `meta_oauth_state=${encodeURIComponent(state)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`
+      'Cache-Control': 'no-store',
+      'Set-Cookie': `meta_oauth_state=${encodeURIComponent(state)}; Path=/; HttpOnly${secureCookie}; SameSite=Lax; Max-Age=600`
     });
     return res.end();
   }
 
-  if (req.method === 'GET' && url.pathname === '/auth/meta/callback/') {
-    const error = url.searchParams.get('error');
-    if (error) return send(res, 400, 'text/html; charset=utf-8', page('Connexion refusée', `<h1>Connexion refusée</h1><p class="note">${error}</p><a class="action" href="/">Retour</a>`));
-    const state = url.searchParams.get('state');
-    const code = url.searchParams.get('code');
-    const session = pending.get(`meta:${state}`);
-    const cookieState = cookies(req).meta_oauth_state;
-    pending.delete(`meta:${state}`);
-    const stateIsValid = session && Date.now() - session.createdAt <= 10 * 60 * 1000;
-    if (!code || (!stateIsValid && cookieState !== state)) return send(res, 400, 'text/html; charset=utf-8', page('Erreur', '<h1>Demande expirée</h1><a class="action" href="/oauth/meta">Recommencer</a>'));
+  if (req.method === 'GET' && url.pathname === '/auth/meta/result/') {
     const config = readMetaConfig();
+    const sessionId = cookies(req).meta_session;
+    const valid = config && validSignedValue(sessionId, config.app_secret);
+    const tokenPath = valid ? path.join(PRIVATE_DIR, `meta-${sessionId.split('.')[0]}.json`) : null;
+    if (!valid || !fs.existsSync(tokenPath)) return send(res, 400, 'text/html; charset=utf-8', page('Connexion nécessaire', '<h1>Reconnecter Facebook</h1><a class="action" href="/oauth/meta">Connecter Facebook</a>'));
+    return send(res, 200, 'text/html; charset=utf-8', page('Meta connecté', '<h1 class="ok">✓ Facebook connecté</h1><p class="note">La connexion Facebook a réussi. Les autorisations Instagram et de diffusion en direct restent à configurer séparément.</p><a class="action" href="/">Retour à MultiLive</a>'));
+  }
+
+  if (['GET', 'POST'].includes(req.method) && url.pathname === '/auth/meta/callback/') {
+    const error = url.searchParams.get('error');
+    if (error) return send(res, 400, 'text/html; charset=utf-8', page('Connexion refusée', '<h1>Connexion refusée</h1><a class="action" href="/">Retour</a>'));
+    let params = url.searchParams;
+    if (req.method === 'POST') {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+        if (body.length > 16000) return send(res, 413, 'text/plain', 'Requête trop volumineuse');
+      }
+      params = new URLSearchParams(body);
+    }
+    const state = params.get('state');
+    const code = params.get('code');
+    const config = readMetaConfig();
+    const cookieState = cookies(req).meta_oauth_state;
+    const age = state ? Date.now() - Number(state.split('.')[0]) : Infinity;
+    if (!code || !config || state !== cookieState || !validSignedValue(state, config.app_secret) || age < 0 || age > 600000) return send(res, 400, 'text/html; charset=utf-8', page('Erreur', '<h1>Demande expirée</h1><a class="action" href="/oauth/meta">Recommencer</a>'));
+    if (req.method === 'GET') {
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      // Reading/prefetching the callback never consumes Facebook's one-use code.
+      return send(res, 200, 'text/html; charset=utf-8', page('Connexion Facebook', `<h1>Finalisation de la connexion…</h1><form method="post" action="/auth/meta/callback/"><input type="hidden" name="code" value="${escapeHtml(code)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><noscript><button type="submit">Finaliser la connexion</button></noscript></form><script>document.querySelector('form').submit()</script>`));
+    }
+    const exchangeKey = crypto.createHash('sha256').update(state + ':' + code).digest('hex');
     try {
-      const tokenUrl = new URL('https://graph.facebook.com/oauth/access_token');
-      tokenUrl.search = new URLSearchParams({ client_id: config.app_id, client_secret: config.app_secret, redirect_uri: META_REDIRECT_URI, code });
-      const response = await fetch(tokenUrl);
-      const tokens = await response.json();
-      if (!response.ok || tokens.error) throw new Error(tokens.error?.message || 'Échange de jeton impossible');
-      fs.writeFileSync(META_TOKEN_FILE, JSON.stringify(tokens, null, 2), { mode: 0o600 });
-      res.setHeader('Set-Cookie', 'meta_oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0');
-      return send(res, 200, 'text/html; charset=utf-8', page('Meta connecté', '<h1 class="ok">✓ Facebook connecté</h1><p class="note">L’autorisation Meta est enregistrée localement. Instagram sera disponible si le compte est professionnel et relié à une Page Facebook.</p><a class="action" href="/">Retour à MultiLive</a>'));
+      if (!metaExchanges.has(exchangeKey)) {
+        const exchange = (async () => {
+          const tokenUrl = new URL('https://graph.facebook.com/oauth/access_token');
+          tokenUrl.search = new URLSearchParams({ client_id: config.app_id, client_secret: config.app_secret, redirect_uri: META_REDIRECT_URI, code });
+          const response = await fetch(tokenUrl);
+          const tokens = await response.json();
+          if (!response.ok || tokens.error || !tokens.access_token) throw new Error(tokens.error?.message || 'Échange de jeton impossible');
+          fs.mkdirSync(PRIVATE_DIR, { recursive: true, mode: 0o700 });
+          const sessionId = randomString(32);
+          fs.writeFileSync(path.join(PRIVATE_DIR, `meta-${sessionId}.json`), JSON.stringify(tokens), { mode: 0o600 });
+          return signedValue(sessionId, config.app_secret);
+        })();
+        metaExchanges.set(exchangeKey, exchange);
+        setTimeout(() => metaExchanges.delete(exchangeKey), 600000).unref();
+      }
+      const sessionId = await metaExchanges.get(exchangeKey);
+      res.writeHead(303, {
+        Location: '/auth/meta/result/',
+        'Cache-Control': 'no-store',
+        'Set-Cookie': `meta_session=${sessionId}; Path=/; HttpOnly${secureCookie}; SameSite=Lax; Max-Age=86400`
+      });
+      return res.end();
     } catch (exchangeError) {
-      return send(res, 502, 'text/html; charset=utf-8', page('Erreur Meta', `<h1>Connexion incomplète</h1><p class="note">${exchangeError.message}</p><a class="action" href="/oauth/meta">Réessayer</a>`));
+      return send(res, 502, 'text/html; charset=utf-8', page('Erreur Meta', `<h1>Connexion incomplète</h1><p class="note">${escapeHtml(exchangeError.message)}</p><a class="action" href="/oauth/meta">Réessayer</a>`));
     }
   }
 

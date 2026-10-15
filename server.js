@@ -329,6 +329,7 @@ const server = http.createServer(async (req, res) => {
       const response = await fetch('https://open.tiktokapis.com/v2/oauth/token/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cache-Control': 'no-cache' }, body: new URLSearchParams({ client_key: config.client_key, client_secret: config.client_secret, code, grant_type: 'authorization_code', redirect_uri: REDIRECT_URI, code_verifier: session.verifier }) });
       const tokens = await response.json();
       if (!response.ok || tokens.error) throw new Error(tokens.error_description || tokens.error || 'Échange de jeton impossible');
+      fs.mkdirSync(PRIVATE_DIR, { recursive: true, mode: 0o700 });
       fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2), { mode: 0o600 });
       const message = '<h1 class="ok">✓ Compte TikTok connecté</h1><p class="note">L’autorisation est réelle et le mot de passe TikTok n’est jamais transmis à MultiLive.</p>';
       const html = mobileCompletionPage('TikTok connecté', message, session.returnTo, { platform: 'tiktok', connections: { facebook: false, instagram: [], tiktok: true } });

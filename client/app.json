@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "MultiLive Test",
+    "slug": "multistream-mobile",
+    "scheme": "multilive",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "MultiLive utilise la caméra pour ton aperçu local.",
+          "recordAudioAndroid": false
+        }
+      ],
+      "expo-web-browser"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.multistream.prototype"
+    },
+    "android": {
+      "package": "com.multistream.prototype",
+      "usesCleartextTraffic": true
+    },
+    "web": {
+      "output": "single",
+      "favicon": "./assets/icon-192.png",
+      "name": "MultiLive",
+      "shortName": "MultiLive",
+      "themeColor": "#BAF473",
+      "backgroundColor": "#090B10"
+    }
+  }
+}

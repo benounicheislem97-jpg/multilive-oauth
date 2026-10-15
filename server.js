@@ -7,6 +7,7 @@ const os = require('os');
 
 const PORT = Number(process.env.PORT || 4320);
 const ROOT = __dirname;
+const APP_DIR = path.join(ROOT, 'public');
 const PRIVATE_DIR = process.env.RENDER ? path.join(os.tmpdir(), 'multilive-private') : path.resolve(ROOT, '../../work');
 const CONFIG_FILE = path.join(PRIVATE_DIR, 'tiktok-oauth-config.json');
 const TOKEN_FILE = path.join(PRIVATE_DIR, 'tiktok-oauth-tokens.json');
@@ -74,8 +75,12 @@ function safeMobileReturn(value) {
   if (!value) return '';
   try {
     const target = new URL(value);
-    if (!['exp:', 'exps:', 'multilive:'].includes(target.protocol)) return '';
-    if (!`${target.hostname}${target.pathname}`.endsWith('auth/connected')) return '';
+    const native = ['exp:', 'exps:', 'multilive:'].includes(target.protocol)
+      && `${target.hostname}${target.pathname}`.endsWith('auth/connected');
+    const web = target.protocol === 'https:'
+      && target.origin === new URL(PUBLIC_BASE_URL).origin
+      && target.pathname === '/auth/connected';
+    if (!native && !web) return '';
     return target.toString();
   } catch { return ''; }
 }
@@ -162,13 +167,6 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       return send(res, 502, 'text/html; charset=utf-8', page('Autorisation Instagram', `<h1>Autorisation Instagram à compléter</h1><p class="note">${escapeHtml(error.message)}</p><a class="action" href="/oauth/instagram">Autoriser Instagram</a>`));
     }
-  }
-
-  if (req.method === 'GET' && url.pathname === '/') {
-    return fs.readFile(path.join(ROOT, 'index.html'), (error, data) => {
-      if (error) return send(res, 500, 'text/plain; charset=utf-8', 'Erreur');
-      send(res, 200, 'text/html; charset=utf-8', data);
-    });
   }
 
   if (req.method === 'GET' && url.pathname === '/setup') {
@@ -337,6 +335,19 @@ const server = http.createServer(async (req, res) => {
     } catch (exchangeError) {
       return send(res, 502, 'text/html; charset=utf-8', page('Erreur TikTok', `<h1>Connexion incomplète</h1><p class="note">${exchangeError.message}</p><a class="action" href="/oauth/tiktok">Réessayer</a>`));
     }
+  }
+
+  if (req.method === 'GET') {
+    const requested = url.pathname === '/' || url.pathname === '/auth/connected' ? 'index.html' : url.pathname.slice(1);
+    const file = path.resolve(APP_DIR, requested);
+    if (!file.startsWith(APP_DIR + path.sep)) return send(res, 404, 'text/plain; charset=utf-8', 'Introuvable');
+    return fs.readFile(file, (error, data) => {
+      if (error) return send(res, 404, 'text/plain; charset=utf-8', 'Introuvable');
+      const extension = path.extname(file).toLowerCase();
+      const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.css': 'text/css; charset=utf-8' };
+      res.writeHead(200, { 'Content-Type': types[extension] || 'application/octet-stream', 'Cache-Control': extension === '.html' ? 'no-store' : 'public, max-age=86400' });
+      res.end(data);
+    });
   }
 
   send(res, 404, 'text/plain; charset=utf-8', 'Introuvable');

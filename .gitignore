@@ -1,4 +1,5 @@
 node_modules/
+client/dist-web/
 .env
 work/
 *.log

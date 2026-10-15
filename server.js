@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const querystring = require('querystring');
 const os = require('os');
+const { WebSocketServer, WebSocket } = require('ws');
 
 const PORT = Number(process.env.PORT || 4320);
 const ROOT = __dirname;
@@ -20,6 +21,7 @@ const pending = new Map();
 const metaExchanges = new Map();
 const mobileHandoffs = new Map();
 const secureCookie = PUBLIC_BASE_URL.startsWith('https:') ? '; Secure' : '';
+const liveRooms = new Map();
 
 function signedValue(value, secret) {
   return `${value}.${crypto.createHmac('sha256', secret).update(value).digest('base64url')}`;
@@ -363,7 +365,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET') {
-    const requested = url.pathname === '/' || url.pathname === '/auth/connected' ? 'index.html' : url.pathname.slice(1);
+    const requested = url.pathname === '/' || url.pathname === '/auth/connected' ? 'index.html' : url.pathname.slice(1) + (url.pathname.endsWith('/') ? 'index.html' : '');
     const file = path.resolve(APP_DIR, requested);
     if (!file.startsWith(APP_DIR + path.sep)) return send(res, 404, 'text/plain; charset=utf-8', 'Introuvable');
     return fs.readFile(file, (error, data) => {
@@ -376,6 +378,63 @@ const server = http.createServer(async (req, res) => {
   }
 
   send(res, 404, 'text/plain; charset=utf-8', 'Introuvable');
+});
+
+const liveSocket = new WebSocketServer({ noServer: true });
+function socketSend(socket, message) {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+}
+function viewerCount(room) { return [...room.viewers.values()].filter(socket => socket.readyState === WebSocket.OPEN).length; }
+function sendViewerCount(room) { socketSend(room.host, { type: 'viewers', count: viewerCount(room) }); }
+function roomCode() {
+  let code;
+  do { code = crypto.randomBytes(3).toString('hex').toUpperCase(); } while (liveRooms.has(code));
+  return code;
+}
+if (typeof server.on === 'function') server.on('upgrade', (req, socket, head) => {
+  const target = new URL(req.url, `http://127.0.0.1:${PORT}`);
+  if (target.pathname !== '/live-test/socket') return socket.destroy();
+  liveSocket.handleUpgrade(req, socket, head, ws => liveSocket.emit('connection', ws));
+});
+liveSocket.on('connection', socket => {
+  let membership = null;
+  socket.on('message', raw => {
+    let message;
+    try { message = JSON.parse(raw.toString()); } catch { return; }
+    if (!membership && message.type === 'host') {
+      const code = roomCode();
+      const room = { host: socket, viewers: new Map(), createdAt: Date.now() };
+      liveRooms.set(code, room); membership = { role: 'host', code };
+      return socketSend(socket, { type: 'room', code, watchUrl: `${PUBLIC_BASE_URL}/live-test/?room=${code}` });
+    }
+    if (!membership && message.type === 'viewer') {
+      const code = String(message.room || '').toUpperCase();
+      const room = liveRooms.get(code);
+      if (!room || room.host.readyState !== WebSocket.OPEN) return socketSend(socket, { type: 'error', message: 'Ce direct de test est fermé.' });
+      const id = randomString(8); room.viewers.set(id, socket); membership = { role: 'viewer', code, id };
+      socketSend(socket, { type: 'joined', id }); socketSend(room.host, { type: 'viewer-joined', id }); sendViewerCount(room); return;
+    }
+    if (!membership) return;
+    const room = liveRooms.get(membership.code);
+    if (!room) return;
+    if (message.type === 'signal') {
+      if (membership.role === 'host') socketSend(room.viewers.get(message.id), { type: 'signal', data: message.data });
+      else socketSend(room.host, { type: 'signal', id: membership.id, data: message.data });
+    }
+    if (message.type === 'comment' && membership.role === 'viewer') {
+      const text = String(message.text || '').trim().slice(0, 180);
+      if (text) socketSend(room.host, { type: 'comment', id: membership.id, name: String(message.name || 'Spectateur').slice(0, 30), text });
+    }
+  });
+  socket.on('close', () => {
+    if (!membership) return;
+    const room = liveRooms.get(membership.code);
+    if (!room) return;
+    if (membership.role === 'host') {
+      for (const viewer of room.viewers.values()) { socketSend(viewer, { type: 'ended' }); viewer.close(); }
+      liveRooms.delete(membership.code);
+    } else { room.viewers.delete(membership.id); socketSend(room.host, { type: 'viewer-left', id: membership.id }); sendViewerCount(room); }
+  });
 });
 
 server.listen(PORT, '0.0.0.0', () => console.log(`http://127.0.0.1:${PORT}`));

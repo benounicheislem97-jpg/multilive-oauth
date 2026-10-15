@@ -66,8 +66,47 @@ function randomString(bytes = 48) {
   return crypto.randomBytes(bytes).toString('base64url').slice(0, 64);
 }
 
+function metaSession(req) {
+  const config = readMetaConfig();
+  const sessionId = cookies(req).meta_session;
+  if (!config || !validSignedValue(sessionId, config.app_secret)) return null;
+  const file = path.join(PRIVATE_DIR, `meta-${sessionId.split('.')[0]}.json`);
+  try { return { file, tokens: JSON.parse(fs.readFileSync(file, 'utf8')), config }; } catch { return null; }
+}
+
+async function instagramAccounts(session) {
+  const endpoint = new URL('https://graph.facebook.com/v25.0/me/accounts');
+  endpoint.search = new URLSearchParams({ fields: 'id,name,instagram_business_account{id,username}', limit: '100', appsecret_proof: crypto.createHmac('sha256', session.config.app_secret).update(session.tokens.access_token).digest('hex') });
+  const response = await fetch(endpoint, { headers: { Authorization: `Bearer ${session.tokens.access_token}` } });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error?.message || 'Impossible de vérifier Instagram.');
+  const accounts = (data.data || []).filter(p => p.instagram_business_account).map(p => ({ pageId: p.id, pageName: p.name, id: p.instagram_business_account.id, username: p.instagram_business_account.username || '' }));
+  return { accounts, pageCount: (data.data || []).length };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
+
+  if (req.method === 'GET' && url.pathname === '/api/connections') {
+    const session = metaSession(req);
+    return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ facebook: Boolean(session?.tokens.access_token), instagram: session?.tokens.instagramAccounts || [] }));
+  }
+
+  if (req.method === 'GET' && url.pathname === '/instagram/accounts/') {
+    const session = metaSession(req);
+    if (!session) { res.writeHead(303, { Location: '/oauth/instagram' }); return res.end(); }
+    try {
+      const { accounts, pageCount } = await instagramAccounts(session);
+      session.tokens.instagramAccounts = accounts;
+      fs.writeFileSync(session.file, JSON.stringify(session.tokens), { mode: 0o600 });
+      const body = accounts.length
+        ? `<h1 class="ok">✓ Instagram connecté</h1>${accounts.map(a => `<p><strong>${escapeHtml(a.username ? '@' + a.username : 'Compte Instagram')}</strong><br>Page Facebook : ${escapeHtml(a.pageName)}</p>`).join('')}<p class="note">Le compte est identifié. La diffusion en direct n’est pas encore activée.</p>`
+        : `<h1>Compte Instagram introuvable</h1><p class="note">${pageCount ? 'Tes Pages Facebook sont visibles, mais aucun compte Instagram professionnel lié n’a été détecté.' : 'Aucune Page Facebook accessible n’a été détectée. Autorise la Page liée à ton compte Instagram.'}</p><p class="note">Pour cette connexion : utilise un compte Instagram Créateur ou Entreprise, lie-le à une Page Facebook que tu gères, puis reconnecte Instagram.</p><a class="action" href="/oauth/instagram">Reconnecter Instagram</a>`;
+      return send(res, 200, 'text/html; charset=utf-8', page('Connexion Instagram', body + '<a class="action" href="/">Retour à MultiLive</a>'));
+    } catch (error) {
+      return send(res, 502, 'text/html; charset=utf-8', page('Autorisation Instagram', `<h1>Autorisation Instagram à compléter</h1><p class="note">${escapeHtml(error.message)}</p><a class="action" href="/oauth/instagram">Autoriser Instagram</a>`));
+    }
+  }
 
   if (req.method === 'GET' && url.pathname === '/') {
     return fs.readFile(path.join(ROOT, 'index.html'), (error, data) => {
@@ -114,11 +153,14 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  if (req.method === 'GET' && url.pathname === '/oauth/meta') {
+  if (req.method === 'GET' && ['/oauth/meta', '/oauth/instagram'].includes(url.pathname)) {
     const config = readMetaConfig();
     if (!config) { res.writeHead(302, { Location: '/setup/meta' }); return res.end(); }
-    const state = signedValue(`${Date.now()}.${randomString(32)}`, config.app_secret);
-    const params = new URLSearchParams({ client_id: config.app_id, redirect_uri: META_REDIRECT_URI, state, response_type: 'code', scope: 'public_profile,email' });
+    const purpose = url.pathname === '/oauth/instagram' ? 'instagram' : 'facebook';
+    const state = signedValue(`${Date.now()}.${purpose}.${randomString(32)}`, config.app_secret);
+    const scope = purpose === 'instagram' ? 'public_profile,instagram_basic,pages_show_list,pages_read_engagement' : 'public_profile,email';
+    const params = new URLSearchParams({ client_id: config.app_id, redirect_uri: META_REDIRECT_URI, state, response_type: 'code', scope });
+    if (purpose === 'instagram') params.set('auth_type', 'rerequest');
     res.writeHead(302, {
       Location: `https://www.facebook.com/dialog/oauth?${params}`,
       'Cache-Control': 'no-store',
@@ -178,7 +220,7 @@ const server = http.createServer(async (req, res) => {
       }
       const sessionId = await metaExchanges.get(exchangeKey);
       res.writeHead(303, {
-        Location: '/auth/meta/result/',
+        Location: state.split('.')[1] === 'instagram' ? '/instagram/accounts/' : '/auth/meta/result/',
         'Cache-Control': 'no-store',
         'Set-Cookie': `meta_session=${sessionId}; Path=/; HttpOnly${secureCookie}; SameSite=Lax; Max-Age=86400`
       });

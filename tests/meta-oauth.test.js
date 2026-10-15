@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { Readable } = require('node:stream');
 
-function harness(sharedFiles = new Map()) {
+function harness(sharedFiles = new Map(), pages = []) {
   let handler;
   let exchanges = 0;
   let directoryCreated = false;
@@ -13,7 +13,7 @@ function harness(sharedFiles = new Map()) {
     mkdirSync() { directoryCreated = true; },
     writeFileSync(file, data) { assert.ok(directoryCreated); sharedFiles.set(file, data); },
     existsSync(file) { return sharedFiles.has(file); },
-    readFileSync() { throw new Error('No local config'); }
+    readFileSync(file) { if (sharedFiles.has(file)) return sharedFiles.get(file); throw new Error('No local config'); }
   };
   const context = {
     require(name) {
@@ -24,7 +24,8 @@ function harness(sharedFiles = new Map()) {
     process: { env: { RENDER: 'true', PUBLIC_BASE_URL: 'https://example.test', META_APP_ID: 'test-id', META_APP_SECRET: 'test-secret' } },
     __dirname: path.resolve(__dirname, '..'), URL, URLSearchParams, Buffer,
     setTimeout() { return { unref() {} }; }, console,
-    async fetch() {
+    async fetch(url) {
+      if (String(url).includes('/me/accounts')) return { ok: true, async json() { return { data: pages }; } };
       exchanges++;
       await new Promise(resolve => setImmediate(resolve));
       return { ok: true, async json() { return { access_token: 'fake-test-token' }; } };
@@ -76,4 +77,33 @@ test('missing cookie and forged or expired state never reach Meta', async () => 
   const forged = '1.fake.invalid';
   assert.equal((await app.request('/auth/meta/callback/', 'meta_oauth_state=' + forged, new URLSearchParams({ code: 'test', state: forged }).toString())).status, 400);
   assert.equal(app.exchanges, 0);
+});
+
+test('Instagram requests only discovery permissions and reports real account connection', async () => {
+  const app = harness(new Map(), [{ id: 'page1', name: 'Test Page', instagram_business_account: { id: 'ig1', username: 'testcreator' } }]);
+  const login = await app.request('/oauth/instagram');
+  const auth = new URL(login.headers.Location);
+  assert.equal(auth.searchParams.get('scope'), 'public_profile,instagram_basic,pages_show_list,pages_read_engagement');
+  const body = new URLSearchParams({ code: 'instagram-test-code', state: auth.searchParams.get('state') }).toString();
+  const reply = await app.request('/auth/meta/callback/', login.headers['Set-Cookie'].split(';')[0], body);
+  assert.equal(reply.headers.Location, '/instagram/accounts/');
+  const session = reply.headers['Set-Cookie'].split(';')[0];
+  const result = await app.request('/instagram/accounts/', session);
+  assert.equal(result.status, 200);
+  assert.match(result.body, /Instagram connecté/);
+  assert.match(result.body, /@testcreator/);
+  const status = JSON.parse((await app.request('/api/connections', session)).body);
+  assert.equal(status.facebook, true);
+  assert.equal(status.instagram[0].username, 'testcreator');
+  assert.ok(!JSON.stringify(status).includes('fake-test-token'));
+});
+
+test('No Page never displays a false Instagram connection', async () => {
+  const app = harness();
+  const login = await app.request('/oauth/instagram');
+  const state = new URL(login.headers.Location).searchParams.get('state');
+  const reply = await app.request('/auth/meta/callback/', login.headers['Set-Cookie'].split(';')[0], new URLSearchParams({ code: 'empty-pages-test', state }).toString());
+  const result = await app.request('/instagram/accounts/', reply.headers['Set-Cookie'].split(';')[0]);
+  assert.match(result.body, /Compte Instagram introuvable/);
+  assert.ok(!result.body.includes('✓ Instagram connecté'));
 });

@@ -11,14 +11,31 @@
 </head>
 <body><main class="page">
 <header class="header"><div class="logo">M</div><div><p class="eyebrow">STUDIO MOBILE</p><div class="brand">Multistream</div></div><div class="badge">PRÊT</div></header>
-<section class="hero"><p class="eyebrow">VOS RÉSEAUX AU MÊME ENDROIT</p><h1>Connectez vos<br>réseaux sociaux.</h1><p>TikTok utilise maintenant sa véritable page officielle d’autorisation.</p></section>
+<section class="hero"><p class="eyebrow">VOS RÉSEAUX AU MÊME ENDROIT</p><h1>Connectez vos<br>réseaux sociaux.</h1><p>Reliez vos comptes avec les autorisations officielles.</p></section>
 <nav class="launcher" aria-label="Ouvrir les réseaux sociaux">
-  <a class="launch-card instagram-card" href="https://www.instagram.com/" target="_blank" rel="noopener"><img src="https://cdn.simpleicons.org/instagram/E4405F" alt="Logo Instagram"><div><strong>Instagram</strong><span>Ouvrir l’application Instagram</span></div><b>›</b></a>
+  <a class="launch-card instagram-card" id="instagram-connect" href="/oauth/instagram"><img src="https://cdn.simpleicons.org/instagram/E4405F" alt="Logo Instagram"><div><strong>Connecter Instagram</strong><span>Compte Créateur ou Entreprise lié à une Page Facebook</span></div><b>›</b></a>
   <a class="launch-card tiktok-card" href="/oauth/tiktok"><img src="https://cdn.simpleicons.org/tiktok/FFFFFF" alt="Logo TikTok"><div><strong>Connecter TikTok</strong><span>Autorisation officielle TikTok</span></div><b>›</b></a>
   <a class="launch-card facebook-card" href="https://www.facebook.com/" target="_blank" rel="noopener"><img src="https://cdn.simpleicons.org/facebook/1877F2" alt="Logo Facebook"><div><strong>Facebook</strong><span>Ouvrir l’application Facebook</span></div><b>›</b></a>
-  <a class="launch-card facebook-card" href="/oauth/meta"><img src="https://cdn.simpleicons.org/meta/1877F2" alt="Logo Meta"><div><strong>Connecter Facebook + Instagram</strong><span>Autorisation officielle Meta</span></div><b>›</b></a>
+  <a class="launch-card facebook-card" id="facebook-connect" href="/oauth/meta"><img src="https://cdn.simpleicons.org/meta/1877F2" alt="Logo Meta"><div><strong>Connecter Facebook</strong><span>Autorisation officielle Meta</span></div><b>›</b></a>
 </nav>
-<p class="simple-note">TikTok ouvre désormais une vraie demande d’autorisation. Instagram et Facebook seront branchés ensuite avec Meta OAuth.</p>
+<p class="simple-note">La connexion des comptes se fait sur les pages officielles des réseaux. La diffusion simultanée n’est pas encore disponible dans ce prototype.</p>
 <p class="phone-note">Prévisualisation interactive de l’application iOS et Android</p>
 </main>
+<script>
+fetch('/api/connections').then(r => r.ok ? r.json() : null).then(status => {
+  if (!status) return;
+  if (status.facebook) {
+    const card = document.getElementById('facebook-connect');
+    card.href = '/auth/meta/result/';
+    card.querySelector('strong').textContent = 'Facebook connecté ✓';
+    card.querySelector('span').textContent = 'Connexion vérifiée';
+  }
+  if (status.instagram.length) {
+    const card = document.getElementById('instagram-connect');
+    card.href = '/instagram/accounts/';
+    card.querySelector('strong').textContent = 'Instagram connecté ✓';
+    card.querySelector('span').textContent = status.instagram.map(a => a.username ? '@' + a.username : 'Compte professionnel').join(', ');
+  }
+}).catch(() => {});
+</script>
 </body></html>

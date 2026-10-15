@@ -24,6 +24,7 @@ const NETWORKS: { id: Network; name: string; color: string; icon: React.Componen
 const CONNECTION_STORE = 'multilive.connections.v1';
 const CLIENT_ID_STORE = 'multilive.pwa.client.v1';
 const AUTH_TOKEN_STORE = 'multilive.auth.token.v1';
+const AUTH_USER_STORE = 'multilive.auth.user.v1';
 const AUTH_BASE = 'https://multilive-oauth.onrender.com';
 const clock = (n: number) => Math.floor(n / 60).toString().padStart(2, '0') + ':' + Math.floor(n % 60).toString().padStart(2, '0');
 const DEMO_COMMENTS = [
@@ -128,11 +129,15 @@ function StudioApp() {
   const elapsedBase = useRef(0);
   const count = NETWORKS.filter(n => selected[n.id]).length;
   useEffect(() => {
-    AsyncStorage.getItem(AUTH_TOKEN_STORE).then(async token => {
-      if (!token) return;
-      const response = await fetch(`${AUTH_BASE}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
-      if (response.ok) setUser((await response.json()).user);
-      else await AsyncStorage.removeItem(AUTH_TOKEN_STORE);
+    Promise.all([AsyncStorage.getItem(AUTH_TOKEN_STORE), AsyncStorage.getItem(AUTH_USER_STORE)]).then(async ([token, cachedUser]) => {
+      if (cachedUser) { setUser(JSON.parse(cachedUser)); setAuthReady(true); }
+      if (token) {
+        const response = await fetch(`${AUTH_BASE}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null);
+        if (response?.ok) {
+          const currentUser = (await response.json()).user; setUser(currentUser); await AsyncStorage.setItem(AUTH_USER_STORE, JSON.stringify(currentUser)); return;
+        }
+        await AsyncStorage.removeItem(AUTH_TOKEN_STORE);
+      }
     }).catch(() => {}).finally(() => setAuthReady(true));
   }, []);
   useEffect(() => {
@@ -286,14 +291,14 @@ function StudioApp() {
       const response = await fetch(`${AUTH_BASE}/api/auth/${authMode}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: authName, email: authEmail, password: authPassword }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Connexion impossible.');
-      await AsyncStorage.setItem(AUTH_TOKEN_STORE, data.token); setUser(data.user); setAuthPassword('');
+      await AsyncStorage.multiSet([[AUTH_TOKEN_STORE, data.token], [AUTH_USER_STORE, JSON.stringify(data.user)]]); setUser(data.user); setAuthPassword('');
     } catch (error) { setAuthError(error instanceof Error ? error.message : 'Connexion impossible.'); }
     finally { setAuthBusy(false); }
   }
   async function logout() {
     const token = await AsyncStorage.getItem(AUTH_TOKEN_STORE);
     if (token) await fetch(`${AUTH_BASE}/api/auth/logout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
-    await AsyncStorage.removeItem(AUTH_TOKEN_STORE); setUser(null); setScreen('home');
+    await AsyncStorage.multiRemove([AUTH_TOKEN_STORE, AUTH_USER_STORE]); setUser(null); setScreen('home');
   }
   const connected = (network: Network) => network === 'facebook' ? connections.facebook : network === 'instagram' ? connections.instagram.length > 0 : connections.tiktok;
   const accountLabel = (network: Network) => network === 'instagram' && connections.instagram[0]?.username ? `@${connections.instagram[0].username}` : network === 'instagram' && connections.instagramAuthorized ? 'Autorisé · compte professionnel introuvable' : connected(network) ? 'Compte connecté ✓' : 'Compte non connecté';

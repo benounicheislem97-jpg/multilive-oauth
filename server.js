@@ -74,14 +74,15 @@ function metaSession(req) {
   try { return { file, tokens: JSON.parse(fs.readFileSync(file, 'utf8')), config }; } catch { return null; }
 }
 
-async function instagramAccounts(session) {
-  const endpoint = new URL('https://graph.facebook.com/v25.0/me/accounts');
+async function instagramAccounts(session, pageId) {
+  const endpoint = new URL(`https://graph.facebook.com/v25.0/${pageId || 'me/accounts'}`);
   endpoint.search = new URLSearchParams({ fields: 'id,name,instagram_business_account{id,username}', limit: '100', appsecret_proof: crypto.createHmac('sha256', session.config.app_secret).update(session.tokens.access_token).digest('hex') });
   const response = await fetch(endpoint, { headers: { Authorization: `Bearer ${session.tokens.access_token}` } });
   const data = await response.json();
   if (!response.ok || data.error) throw new Error(data.error?.message || 'Impossible de vérifier Instagram.');
-  const accounts = (data.data || []).filter(p => p.instagram_business_account).map(p => ({ pageId: p.id, pageName: p.name, id: p.instagram_business_account.id, username: p.instagram_business_account.username || '' }));
-  return { accounts, pageCount: (data.data || []).length };
+  const pages = pageId ? [data] : (data.data || []);
+  const accounts = pages.filter(p => p.instagram_business_account).map(p => ({ pageId: p.id, pageName: p.name, id: p.instagram_business_account.id, username: p.instagram_business_account.username || '' }));
+  return { accounts, pageCount: pages.length };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -96,8 +97,11 @@ const server = http.createServer(async (req, res) => {
     const session = metaSession(req);
     if (!session) { res.writeHead(303, { Location: '/oauth/instagram' }); return res.end(); }
     try {
-      const { accounts, pageCount } = await instagramAccounts(session);
+      const pageId = url.searchParams.get('page_id') || session.tokens.instagramPageId;
+      if (pageId && !/^\d{1,30}$/.test(pageId)) return send(res, 400, 'text/plain', 'Page invalide');
+      const { accounts, pageCount } = await instagramAccounts(session, pageId);
       session.tokens.instagramAccounts = accounts;
+      if (accounts.length && pageId) session.tokens.instagramPageId = pageId;
       fs.writeFileSync(session.file, JSON.stringify(session.tokens), { mode: 0o600 });
       const body = accounts.length
         ? `<h1 class="ok">✓ Instagram connecté</h1>${accounts.map(a => `<p><strong>${escapeHtml(a.username ? '@' + a.username : 'Compte Instagram')}</strong><br>Page Facebook : ${escapeHtml(a.pageName)}</p>`).join('')}<p class="note">Le compte est identifié. La diffusion en direct n’est pas encore activée.</p>`

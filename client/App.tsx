@@ -12,6 +12,7 @@ WebBrowser.maybeCompleteAuthSession();
 type Screen = 'home' | 'studio' | 'settings';
 type Network = 'instagram' | 'tiktok' | 'facebook';
 type PreviewFilter = 'Naturel' | 'Éclat' | 'Doux' | 'Chaud' | 'Froid' | 'Mono';
+type VirtualBackground = 'Réel' | 'Flou' | 'Mur blanc' | 'Bureau';
 type DemoComment = { id: number; user: string; text: string };
 type MultiLiveUser = { id: string; name: string; email: string; plan: string; payments: { id: string; amount: number; date: string }[] };
 type Connections = { facebook: boolean; instagram: { id?: string; username?: string }[]; instagramAuthorized?: boolean; tiktok: boolean };
@@ -44,6 +45,57 @@ function CommentBubble({ comment }: { comment: DemoComment }) {
   </Animated.View>;
 }
 
+let segmentationLoader: Promise<any> | null = null;
+function loadSegmentation() {
+  if ((window as any).SelfieSegmentation) return Promise.resolve((window as any).SelfieSegmentation);
+  if (segmentationLoader) return segmentationLoader;
+  segmentationLoader = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js';
+    script.onload = () => resolve((window as any).SelfieSegmentation);
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+  return segmentationLoader;
+}
+
+function WebVirtualCamera({ facing, background, onError }: { facing: 'front' | 'back'; background: VirtualBackground; onError: () => void }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const backgroundRef = useRef(background);
+  useEffect(() => { backgroundRef.current = background; }, [background]);
+  useEffect(() => {
+    let active = true; let frame = 0; let media: MediaStream | null = null; let segmenter: any;
+    const office = new Image(); office.crossOrigin = 'anonymous'; office.src = 'https://images.pexels.com/photos/12526862/pexels-photo-12526862.jpeg?auto=compress&cs=tinysrgb&w=1280';
+    (async () => {
+      try {
+        media = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing === 'front' ? 'user' : 'environment', width: { ideal: 720 } }, audio: false });
+        const video = videoRef.current; const canvas = canvasRef.current; if (!video || !canvas || !active) return;
+        video.srcObject = media; await video.play();
+        const SelfieSegmentation = await loadSegmentation(); if (!active) return;
+        segmenter = new SelfieSegmentation({ locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}` });
+        segmenter.setOptions({ modelSelection: 1, selfieMode: facing === 'front' });
+        segmenter.onResults((result: any) => {
+          const ctx = canvas.getContext('2d'); if (!ctx) return;
+          canvas.width = result.image.width; canvas.height = result.image.height;
+          ctx.save(); ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(result.segmentationMask, 0, 0, canvas.width, canvas.height);
+          ctx.globalCompositeOperation = 'source-in'; ctx.drawImage(result.image, 0, 0, canvas.width, canvas.height); ctx.globalCompositeOperation = 'destination-over';
+          const selected = backgroundRef.current;
+          if (selected === 'Mur blanc') { ctx.fillStyle = '#F7F7F4'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+          else if (selected === 'Bureau' && office.complete) ctx.drawImage(office, 0, 0, canvas.width, canvas.height);
+          else { ctx.filter = selected === 'Flou' ? 'blur(22px)' : 'none'; ctx.drawImage(result.image, -20, -20, canvas.width + 40, canvas.height + 40); ctx.filter = 'none'; }
+          ctx.restore();
+        });
+        const process = async () => { if (!active) return; if (video.readyState >= 2) await segmenter.send({ image: video }); frame = requestAnimationFrame(process); };
+        frame = requestAnimationFrame(process);
+      } catch { onError(); }
+    })();
+    return () => { active = false; cancelAnimationFrame(frame); media?.getTracks().forEach(track => track.stop()); segmenter?.close?.(); };
+  }, [facing]);
+  const transform = facing === 'front' ? 'scaleX(-1)' : undefined;
+  return <>{React.createElement('video', { ref: videoRef, autoPlay: true, playsInline: true, muted: true, style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transform, display: background === 'Réel' ? 'block' : 'none' } })}{React.createElement('canvas', { ref: canvasRef, style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', transform, display: background === 'Réel' ? 'none' : 'block' } })}</>;
+}
+
 function StudioApp() {
   const [screen, setScreen] = useState<Screen>('home');
   const [selected, setSelected] = useState<Record<Network, boolean>>({ instagram: true, tiktok: false, facebook: true });
@@ -56,6 +108,7 @@ function StudioApp() {
   const [commentsVisible, setCommentsVisible] = useState(true);
   const [elapsed, setElapsed] = useState(0);
   const [previewFilter, setPreviewFilter] = useState<PreviewFilter>('Naturel');
+  const [virtualBackground, setVirtualBackground] = useState<VirtualBackground>('Réel');
   const [showFilters, setShowFilters] = useState(false);
   const [guestCount, setGuestCount] = useState(0);
   const [comments, setComments] = useState<DemoComment[]>([]);
@@ -251,7 +304,7 @@ function StudioApp() {
   const filterTint = previewFilter === 'Chaud' ? '#FF8A3D2E' : previewFilter === 'Froid' ? '#398CFF30' : previewFilter === 'Éclat' ? '#FFF4D622' : previewFilter === 'Doux' ? '#FFB5C525' : previewFilter === 'Mono' ? '#8B93A04D' : 'transparent';
   if (screen === 'studio') return <SafeAreaView style={s.liveSafe} edges={['top', 'bottom']}><StatusBar barStyle="light-content" />
     <View style={s.liveStage}>
-      {camera && permission?.granted ? <CameraView style={StyleSheet.absoluteFill} facing={facing} onMountError={() => { setCamera(false); Alert.alert('Caméra indisponible', 'Réessaie depuis ton téléphone.'); }} /> : <View style={s.fullCameraPlaceholder}><Ionicons name="videocam-outline" size={54} color="#BAF473" /><Text style={s.liveTitle}>Caméra désactivée</Text><Pressable onPress={() => { void enableCamera(); }} style={s.previewButton}><Text style={s.previewButtonText}>Activer la caméra</Text></Pressable></View>}
+      {camera && permission?.granted ? Platform.OS === 'web' ? <WebVirtualCamera facing={facing} background={virtualBackground} onError={() => { setCamera(false); Alert.alert('Caméra indisponible', 'Réessaie depuis ton téléphone.'); }} /> : <CameraView style={StyleSheet.absoluteFill} facing={facing} onMountError={() => { setCamera(false); Alert.alert('Caméra indisponible', 'Réessaie depuis ton téléphone.'); }} /> : <View style={s.fullCameraPlaceholder}><Ionicons name="videocam-outline" size={54} color="#BAF473" /><Text style={s.liveTitle}>Caméra désactivée</Text><Pressable onPress={() => { void enableCamera(); }} style={s.previewButton}><Text style={s.previewButtonText}>Activer la caméra</Text></Pressable></View>}
       {previewFilter !== 'Naturel' && <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: filterTint }]} />}
       <View style={s.liveShadeTop} pointerEvents="none" /><View style={s.liveShadeBottom} pointerEvents="none" />
       <View style={s.liveTopbar}>
@@ -270,7 +323,7 @@ function StudioApp() {
         {guestCount > 0 && <Pressable accessibilityLabel="Retirer un invité" onPress={() => setGuestCount(value => Math.max(0, value - 1))} style={s.railButton}><Ionicons name="person-remove" size={22} color="#fff" /><Text style={s.railLabel}>Retirer</Text></Pressable>}
       </View>
       {commentsVisible && <View style={s.liveComments}>{comments.map(comment => <CommentBubble key={comment.id} comment={comment} />)}{!running && <View style={s.hintBubble}><Text style={s.hintText}>Les commentaires apparaîtront ici pendant le test.</Text></View>}</View>}
-      {showFilters && <View style={s.filterDrawer}><Text style={s.drawerTitle}>FILTRES MULTILIVE</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.liveFilterRow}>{(['Naturel', 'Éclat', 'Doux', 'Chaud', 'Froid', 'Mono'] as PreviewFilter[]).map(filter => <Pressable key={filter} onPress={() => setPreviewFilter(filter)} style={s.liveFilterItem}><View style={[s.filterPreview, previewFilter === filter && s.filterPreviewOn, { backgroundColor: filter === 'Chaud' ? '#C97341' : filter === 'Froid' ? '#4777A8' : filter === 'Éclat' ? '#E4C777' : filter === 'Doux' ? '#C77B8C' : filter === 'Mono' ? '#777' : '#8E9B86' }]}><Ionicons name="person" size={23} color="#fff" /></View><Text style={[s.liveFilterText, previewFilter === filter && { color: '#BAF473' }]}>{filter}</Text></Pressable>)}</ScrollView></View>}
+      {showFilters && <View style={s.filterDrawer}><Text style={s.drawerTitle}>ARRIÈRE-PLANS</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.liveFilterRow}>{(['Réel', 'Flou', 'Mur blanc', 'Bureau'] as VirtualBackground[]).map(item => <Pressable key={item} onPress={() => setVirtualBackground(item)} style={s.liveFilterItem}><View style={[s.filterPreview, virtualBackground === item && s.filterPreviewOn, { backgroundColor: item === 'Mur blanc' ? '#F4F4F0' : item === 'Bureau' ? '#8B684C' : item === 'Flou' ? '#617365' : '#25342A' }]}><Ionicons name={item === 'Bureau' ? 'business' : item === 'Mur blanc' ? 'square' : item === 'Flou' ? 'water' : 'person'} size={23} color={item === 'Mur blanc' ? '#777' : '#fff'} /></View><Text style={[s.liveFilterText, virtualBackground === item && { color: '#BAF473' }]}>{item}</Text></Pressable>)}</ScrollView><Text style={[s.drawerTitle, { marginTop: 13 }]}>COULEURS</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.liveFilterRow}>{(['Naturel', 'Éclat', 'Doux', 'Chaud', 'Froid', 'Mono'] as PreviewFilter[]).map(filter => <Pressable key={filter} onPress={() => setPreviewFilter(filter)} style={s.liveFilterItem}><View style={[s.filterPreview, previewFilter === filter && s.filterPreviewOn, { backgroundColor: filter === 'Chaud' ? '#C97341' : filter === 'Froid' ? '#4777A8' : filter === 'Éclat' ? '#E4C777' : filter === 'Doux' ? '#C77B8C' : filter === 'Mono' ? '#777' : '#8E9B86' }]}><Ionicons name="person" size={23} color="#fff" /></View><Text style={[s.liveFilterText, previewFilter === filter && { color: '#BAF473' }]}>{filter}</Text></Pressable>)}</ScrollView></View>}
       <View style={s.liveBottom}>
         <Pressable accessibilityLabel="Couper ou activer la caméra" onPress={() => camera ? setCamera(false) : void enableCamera()} style={s.bottomRound}><Ionicons name={camera ? 'videocam' : 'videocam-off'} size={23} color="#fff" /></Pressable>
         {!running ? <Pressable disabled={!count} onPress={start} style={s.goLive}><Text style={s.goLiveText}>DÉMARRER LE TEST</Text></Pressable> : <>

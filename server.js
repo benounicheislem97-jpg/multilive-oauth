@@ -17,6 +17,7 @@ const REDIRECT_URI = process.env.TIKTOK_REDIRECT_URI || `${PUBLIC_BASE_URL}/auth
 const META_REDIRECT_URI = `${PUBLIC_BASE_URL}/auth/meta/callback/`;
 const pending = new Map();
 const metaExchanges = new Map();
+const mobileHandoffs = new Map();
 const secureCookie = PUBLIC_BASE_URL.startsWith('https:') ? '; Secure' : '';
 
 function signedValue(value, secret) {
@@ -69,12 +70,51 @@ function randomString(bytes = 48) {
   return crypto.randomBytes(bytes).toString('base64url').slice(0, 64);
 }
 
+function safeMobileReturn(value) {
+  if (!value) return '';
+  try {
+    const target = new URL(value);
+    if (!['exp:', 'exps:', 'multilive:'].includes(target.protocol)) return '';
+    if (!`${target.hostname}${target.pathname}`.endsWith('auth/connected')) return '';
+    return target.toString();
+  } catch { return ''; }
+}
+
+function mobileReturnFromState(state, secret) {
+  if (!validSignedValue(state, secret)) return '';
+  const encoded = state.split('.')[3];
+  if (!encoded) return '';
+  try { return safeMobileReturn(Buffer.from(encoded, 'base64url').toString('utf8')); } catch { return ''; }
+}
+
+function connectionStatus(tokens = {}) {
+  return { facebook: Boolean(tokens.access_token), instagram: tokens.instagramAccounts || [], tiktok: false };
+}
+
+function issueMobileHandoff(returnTo, result) {
+  const safeReturn = safeMobileReturn(returnTo);
+  if (!safeReturn) return '';
+  const code = randomString(32);
+  mobileHandoffs.set(code, { result, expiresAt: Date.now() + 120000 });
+  setTimeout(() => mobileHandoffs.delete(code), 120000).unref();
+  const target = new URL(safeReturn);
+  target.searchParams.set('handoff', code);
+  return target.toString();
+}
+
+function mobileCompletionPage(title, message, returnTo, result) {
+  const target = issueMobileHandoff(returnTo, result);
+  if (!target) return page(title, message);
+  const scriptTarget = JSON.stringify(target).replace(/</g, '\\u003c');
+  return page(title, `${message}<a class="action" href="${escapeHtml(target)}">Retourner dans MultiLive</a><script>location.href=${scriptTarget}</script>`);
+}
+
 function metaSession(req) {
   const config = readMetaConfig();
   const sessionId = cookies(req).meta_session;
   if (!config || !validSignedValue(sessionId, config.app_secret)) return null;
   const file = path.join(PRIVATE_DIR, `meta-${sessionId.split('.')[0]}.json`);
-  try { return { file, tokens: JSON.parse(fs.readFileSync(file, 'utf8')), config }; } catch { return null; }
+  try { return { file, sessionId, tokens: JSON.parse(fs.readFileSync(file, 'utf8')), config }; } catch { return null; }
 }
 
 async function instagramAccounts(session, pageId) {
@@ -90,6 +130,14 @@ async function instagramAccounts(session, pageId) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
+
+  if (req.method === 'GET' && url.pathname === '/api/mobile/exchange') {
+    const code = url.searchParams.get('code');
+    const handoff = mobileHandoffs.get(code);
+    mobileHandoffs.delete(code);
+    if (!handoff || handoff.expiresAt < Date.now()) return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Retour expiré' }));
+    return send(res, 200, 'application/json; charset=utf-8', JSON.stringify(handoff.result));
+  }
 
   if (req.method === 'GET' && url.pathname === '/api/connections') {
     const session = metaSession(req);
@@ -109,7 +157,8 @@ const server = http.createServer(async (req, res) => {
       const body = accounts.length
         ? `<h1 class="ok">✓ Instagram connecté</h1>${accounts.map(a => `<p><strong>${escapeHtml(a.username ? '@' + a.username : 'Compte Instagram')}</strong><br>Page Facebook : ${escapeHtml(a.pageName)}</p>`).join('')}<p class="note">Le compte est identifié. La diffusion en direct n’est pas encore activée.</p>`
         : `<h1>Compte Instagram introuvable</h1><p class="note">${pageCount ? 'Tes Pages Facebook sont visibles, mais aucun compte Instagram professionnel lié n’a été détecté.' : 'Aucune Page Facebook accessible n’a été détectée. Autorise la Page liée à ton compte Instagram.'}</p><p class="note">Pour cette connexion : utilise un compte Instagram Créateur ou Entreprise, lie-le à une Page Facebook que tu gères, puis reconnecte Instagram.</p><a class="action" href="/oauth/instagram">Reconnecter Instagram</a>`;
-      return send(res, 200, 'text/html; charset=utf-8', page('Connexion Instagram', body + '<a class="action" href="/">Retour à MultiLive</a>'));
+      const html = mobileCompletionPage('Connexion Instagram', body, session.tokens.mobileReturn, { platform: 'instagram', connections: connectionStatus(session.tokens) });
+      return send(res, 200, 'text/html; charset=utf-8', session.tokens.mobileReturn ? html : page('Connexion Instagram', body + '<a class="action" href="/">Retour à MultiLive</a>'));
     } catch (error) {
       return send(res, 502, 'text/html; charset=utf-8', page('Autorisation Instagram', `<h1>Autorisation Instagram à compléter</h1><p class="note">${escapeHtml(error.message)}</p><a class="action" href="/oauth/instagram">Autoriser Instagram</a>`));
     }
@@ -164,7 +213,9 @@ const server = http.createServer(async (req, res) => {
     const config = readMetaConfig();
     if (!config) { res.writeHead(302, { Location: '/setup/meta' }); return res.end(); }
     const purpose = url.pathname === '/oauth/instagram' ? 'instagram' : 'facebook';
-    const state = signedValue(`${Date.now()}.${purpose}.${randomString(32)}`, config.app_secret);
+    const returnTo = safeMobileReturn(url.searchParams.get('return_to'));
+    const returnPart = returnTo ? Buffer.from(returnTo).toString('base64url') : '';
+    const state = signedValue(`${Date.now()}.${purpose}.${randomString(32)}.${returnPart}`, config.app_secret);
     const scope = purpose === 'instagram' ? 'public_profile,instagram_basic,pages_show_list,pages_read_engagement' : 'public_profile,email';
     const params = new URLSearchParams({ client_id: config.app_id, redirect_uri: META_REDIRECT_URI, state, response_type: 'code', scope });
     if (purpose === 'instagram') params.set('auth_type', 'rerequest');
@@ -182,7 +233,10 @@ const server = http.createServer(async (req, res) => {
     const valid = config && validSignedValue(sessionId, config.app_secret);
     const tokenPath = valid ? path.join(PRIVATE_DIR, `meta-${sessionId.split('.')[0]}.json`) : null;
     if (!valid || !fs.existsSync(tokenPath)) return send(res, 400, 'text/html; charset=utf-8', page('Connexion nécessaire', '<h1>Reconnecter Facebook</h1><a class="action" href="/oauth/meta">Connecter Facebook</a>'));
-    return send(res, 200, 'text/html; charset=utf-8', page('Meta connecté', '<h1 class="ok">✓ Facebook connecté</h1><p class="note">La connexion Facebook a réussi. Les autorisations Instagram et de diffusion en direct restent à configurer séparément.</p><a class="action" href="/">Retour à MultiLive</a>'));
+    const tokens = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+    const message = '<h1 class="ok">✓ Facebook connecté</h1><p class="note">La connexion Facebook a réussi. Les autorisations Instagram et de diffusion en direct restent à configurer séparément.</p>';
+    const html = mobileCompletionPage('Meta connecté', message, tokens.mobileReturn, { platform: 'facebook', connections: connectionStatus(tokens) });
+    return send(res, 200, 'text/html; charset=utf-8', tokens.mobileReturn ? html : page('Meta connecté', message + '<a class="action" href="/">Retour à MultiLive</a>'));
   }
 
   if (['GET', 'POST'].includes(req.method) && url.pathname === '/auth/meta/callback/') {
@@ -218,6 +272,7 @@ const server = http.createServer(async (req, res) => {
           const tokens = await response.json();
           if (!response.ok || tokens.error || !tokens.access_token) throw new Error(tokens.error?.message || 'Échange de jeton impossible');
           fs.mkdirSync(PRIVATE_DIR, { recursive: true, mode: 0o700 });
+          tokens.mobileReturn = mobileReturnFromState(state, config.app_secret);
           const sessionId = randomString(32);
           fs.writeFileSync(path.join(PRIVATE_DIR, `meta-${sessionId}.json`), JSON.stringify(tokens), { mode: 0o600 });
           return signedValue(sessionId, config.app_secret);
@@ -255,7 +310,7 @@ const server = http.createServer(async (req, res) => {
     const state = randomString(32);
     const verifier = randomString(64);
     const challenge = crypto.createHash('sha256').update(verifier).digest('hex');
-    pending.set(state, { verifier, createdAt: Date.now() });
+    pending.set(state, { verifier, createdAt: Date.now(), returnTo: safeMobileReturn(url.searchParams.get('return_to')) });
     const params = new URLSearchParams({ client_key: config.client_key, response_type: 'code', scope: 'user.info.basic', redirect_uri: REDIRECT_URI, state, code_challenge: challenge, code_challenge_method: 'S256' });
     res.writeHead(302, { Location: `https://www.tiktok.com/v2/auth/authorize/?${params}` });
     return res.end();
@@ -275,7 +330,9 @@ const server = http.createServer(async (req, res) => {
       const tokens = await response.json();
       if (!response.ok || tokens.error) throw new Error(tokens.error_description || tokens.error || 'Échange de jeton impossible');
       fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2), { mode: 0o600 });
-      return send(res, 200, 'text/html; charset=utf-8', page('TikTok connecté', '<h1 class="ok">✓ Compte TikTok connecté</h1><p class="note">L’autorisation est réelle et les jetons restent sur ce PC.</p><a class="action" href="/">Retour à MultiLive</a>'));
+      const message = '<h1 class="ok">✓ Compte TikTok connecté</h1><p class="note">L’autorisation est réelle et le mot de passe TikTok n’est jamais transmis à MultiLive.</p>';
+      const html = mobileCompletionPage('TikTok connecté', message, session.returnTo, { platform: 'tiktok', connections: { facebook: false, instagram: [], tiktok: true } });
+      return send(res, 200, 'text/html; charset=utf-8', session.returnTo ? html : page('TikTok connecté', message + '<a class="action" href="/">Retour à MultiLive</a>'));
     } catch (exchangeError) {
       return send(res, 502, 'text/html; charset=utf-8', page('Erreur TikTok', `<h1>Connexion incomplète</h1><p class="note">${exchangeError.message}</p><a class="action" href="/oauth/tiktok">Réessayer</a>`));
     }

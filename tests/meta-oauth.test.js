@@ -107,3 +107,19 @@ test('No Page never displays a false Instagram connection', async () => {
   assert.match(result.body, /Compte Instagram introuvable/);
   assert.ok(!result.body.includes('✓ Instagram connecté'));
 });
+
+test('mobile OAuth returns a one-time verified connection handoff', async () => {
+  const app = harness();
+  const returnTo = 'multilive://auth/connected';
+  const login = await app.request('/oauth/meta?return_to=' + encodeURIComponent(returnTo));
+  const auth = new URL(login.headers.Location);
+  const body = new URLSearchParams({ code: 'mobile-code', state: auth.searchParams.get('state') }).toString();
+  const callback = await app.request('/auth/meta/callback/', login.headers['Set-Cookie'].split(';')[0], body);
+  const result = await app.request(callback.headers.Location, callback.headers['Set-Cookie'].split(';')[0]);
+  const match = result.body.match(/handoff=([^&"<]+)/);
+  assert.ok(match);
+  const exchange = await app.request('/api/mobile/exchange?code=' + decodeURIComponent(match[1]));
+  assert.equal(exchange.status, 200);
+  assert.equal(JSON.parse(exchange.body).connections.facebook, true);
+  assert.equal((await app.request('/api/mobile/exchange?code=' + decodeURIComponent(match[1]))).status, 400);
+});

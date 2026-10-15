@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Animated, AppState, Alert, Linking, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Switch, Text, View } from 'react-native';
+import { Animated, AppState, Alert, Linking, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -13,18 +13,17 @@ type Screen = 'home' | 'studio' | 'settings';
 type Network = 'instagram' | 'tiktok' | 'facebook';
 type PreviewFilter = 'Naturel' | 'Éclat' | 'Doux' | 'Chaud' | 'Froid' | 'Mono';
 type DemoComment = { id: number; user: string; text: string };
+type MultiLiveUser = { id: string; name: string; email: string; plan: string; payments: { id: string; amount: number; date: string }[] };
 type Connections = { facebook: boolean; instagram: { id?: string; username?: string }[]; tiktok: boolean };
 const NETWORKS: { id: Network; name: string; color: string; icon: React.ComponentProps<typeof Ionicons>['name'] }[] = [
   { id: 'instagram', name: 'Instagram', color: '#F078C1', icon: 'logo-instagram' },
   { id: 'tiktok', name: 'TikTok', color: '#6DE4DF', icon: 'logo-tiktok' },
   { id: 'facebook', name: 'Facebook', color: '#7DA7FF', icon: 'logo-facebook' },
 ];
-const LIMIT = 1200;
-const STORE = 'multilive.simulation.usage.v1';
 const CONNECTION_STORE = 'multilive.connections.v1';
 const CLIENT_ID_STORE = 'multilive.pwa.client.v1';
+const AUTH_TOKEN_STORE = 'multilive.auth.token.v1';
 const AUTH_BASE = 'https://multilive-oauth.onrender.com';
-const day = () => { const d = new Date(); return [d.getFullYear(), d.getMonth() + 1, d.getDate()].join('-'); };
 const clock = (n: number) => Math.floor(n / 60).toString().padStart(2, '0') + ':' + Math.floor(n % 60).toString().padStart(2, '0');
 const DEMO_COMMENTS = [
   { user: 'Nadia', text: 'Bonsoir tout le monde 👋' },
@@ -55,10 +54,7 @@ function StudioApp() {
   const [paused, setPaused] = useState(false);
   const [micEnabled, setMicEnabled] = useState(true);
   const [commentsVisible, setCommentsVisible] = useState(true);
-  const [used, setUsed] = useState(0);
   const [elapsed, setElapsed] = useState(0);
-  const [ready, setReady] = useState(false);
-  const [storageError, setStorageError] = useState(false);
   const [previewFilter, setPreviewFilter] = useState<PreviewFilter>('Naturel');
   const [showFilters, setShowFilters] = useState(false);
   const [guestCount, setGuestCount] = useState(0);
@@ -67,17 +63,24 @@ function StudioApp() {
   const commentCounter = useRef(0);
   const [connections, setConnections] = useState<Connections>({ facebook: false, instagram: [], tiktok: false });
   const [connecting, setConnecting] = useState<Network | null>(null);
-  const usage = useRef({ date: day(), seconds: 0 });
+  const [user, setUser] = useState<MultiLiveUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authName, setAuthName] = useState('');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState('');
   const startAt = useRef(0);
-  const baseUsed = useRef(0);
   const elapsedBase = useRef(0);
   const count = NETWORKS.filter(n => selected[n.id]).length;
-  const persist = () => AsyncStorage.setItem(STORE, JSON.stringify(usage.current)).catch(() => setStorageError(true));
   useEffect(() => {
-    AsyncStorage.getItem(STORE).then(raw => {
-      if (raw) { const saved = JSON.parse(raw); if (saved.date === day() && Number.isFinite(saved.seconds)) usage.current.seconds = Math.max(0, Math.min(LIMIT, saved.seconds)); }
-      setUsed(usage.current.seconds);
-    }).catch(() => setStorageError(true)).finally(() => setReady(true));
+    AsyncStorage.getItem(AUTH_TOKEN_STORE).then(async token => {
+      if (!token) return;
+      const response = await fetch(`${AUTH_BASE}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
+      if (response.ok) setUser((await response.json()).user);
+      else await AsyncStorage.removeItem(AUTH_TOKEN_STORE);
+    }).catch(() => {}).finally(() => setAuthReady(true));
   }, []);
   useEffect(() => {
     AsyncStorage.getItem(CONNECTION_STORE).then(raw => {
@@ -105,8 +108,7 @@ function StudioApp() {
   function stop() {
     if (startAt.current) {
       const duration = Math.max(0, Math.floor((Date.now() - startAt.current) / 1000));
-      usage.current = { date: day(), seconds: Math.min(LIMIT, baseUsed.current + duration) };
-      elapsedBase.current += duration; setElapsed(elapsedBase.current); setUsed(usage.current.seconds); startAt.current = 0; void persist();
+      elapsedBase.current += duration; setElapsed(elapsedBase.current); startAt.current = 0;
     }
     setRunning(false); setPaused(false);
   }
@@ -114,24 +116,19 @@ function StudioApp() {
     if (!running || paused) return;
     if (startAt.current) {
       const duration = Math.max(0, Math.floor((Date.now() - startAt.current) / 1000));
-      usage.current = { date: day(), seconds: Math.min(LIMIT, baseUsed.current + duration) };
-      elapsedBase.current += duration; setElapsed(elapsedBase.current); setUsed(usage.current.seconds); startAt.current = 0; void persist();
+      elapsedBase.current += duration; setElapsed(elapsedBase.current); startAt.current = 0;
     }
     setPaused(true);
   }
   function resume() {
-    if (!running || !paused || usage.current.seconds >= LIMIT) return;
-    baseUsed.current = usage.current.seconds; startAt.current = Date.now(); setPaused(false);
+    if (!running || !paused) return;
+    startAt.current = Date.now(); setPaused(false);
   }
   useEffect(() => {
     if (!running || paused) return;
     const timer = setInterval(() => {
-      if (usage.current.date !== day()) { usage.current = { date: day(), seconds: 0 }; baseUsed.current = 0; startAt.current = Date.now(); }
       const duration = Math.max(0, Math.floor((Date.now() - startAt.current) / 1000));
-      const total = Math.min(LIMIT, baseUsed.current + duration);
-      usage.current.seconds = total; setUsed(total); setElapsed(elapsedBase.current + duration);
-      if (duration % 5 === 0) void persist();
-      if (total >= LIMIT) stop();
+      setElapsed(elapsedBase.current + duration);
     }, 500);
     const listener = AppState.addEventListener('change', state => { if (state !== 'active') { stop(); setCamera(false); } });
     return () => { clearInterval(timer); listener.remove(); };
@@ -158,9 +155,7 @@ function StudioApp() {
   }, []);
   function start() {
     if (!count) return Alert.alert('Choisis un réseau', 'Active au moins une destination de test.');
-    if (usage.current.date !== day()) usage.current = { date: day(), seconds: 0 };
-    if (usage.current.seconds >= LIMIT) return Alert.alert('Essai terminé', 'Les 20 minutes de simulation du jour sont utilisées. Aucun paiement activé.');
-    baseUsed.current = usage.current.seconds; elapsedBase.current = 0; startAt.current = Date.now(); setElapsed(0); setPaused(false); setRunning(true); setScreen('studio'); void enableCamera();
+    elapsedBase.current = 0; startAt.current = Date.now(); setElapsed(0); setPaused(false); setRunning(true); setScreen('studio'); void enableCamera();
   }
   async function enableCamera() {
     try {
@@ -231,10 +226,27 @@ function StudioApp() {
       await completeConnection(handoff, network);
     } finally { setConnecting(null); }
   }
+  async function submitAuth() {
+    setAuthError(''); setAuthBusy(true);
+    try {
+      const response = await fetch(`${AUTH_BASE}/api/auth/${authMode}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: authName, email: authEmail, password: authPassword }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Connexion impossible.');
+      await AsyncStorage.setItem(AUTH_TOKEN_STORE, data.token); setUser(data.user); setAuthPassword('');
+    } catch (error) { setAuthError(error instanceof Error ? error.message : 'Connexion impossible.'); }
+    finally { setAuthBusy(false); }
+  }
+  async function logout() {
+    const token = await AsyncStorage.getItem(AUTH_TOKEN_STORE);
+    if (token) await fetch(`${AUTH_BASE}/api/auth/logout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    await AsyncStorage.removeItem(AUTH_TOKEN_STORE); setUser(null); setScreen('home');
+  }
   const connected = (network: Network) => network === 'facebook' ? connections.facebook : network === 'instagram' ? connections.instagram.length > 0 : connections.tiktok;
   const accountLabel = (network: Network) => network === 'instagram' && connections.instagram[0]?.username ? `@${connections.instagram[0].username}` : connected(network) ? 'Compte connecté ✓' : 'Compte non connecté';
   function go(next: Screen) { if (next !== 'studio') { stop(); setCamera(false); } setScreen(next); }
   const button = (label: string, action: () => void, secondary = false, disabled = false) => <Pressable accessibilityRole="button" disabled={disabled} onPress={action} style={({ pressed }) => [s.button, secondary && s.secondary, (pressed || disabled) && { opacity: 0.5 }]}><Text style={[s.buttonText, secondary && { color: '#F3F4F6' }]}>{label}</Text></Pressable>;
+  if (!authReady) return <SafeAreaView style={s.authPage}><StatusBar barStyle="light-content" /><Text style={s.authLoading}>Ouverture de MultiLive…</Text></SafeAreaView>;
+  if (!user) return <SafeAreaView style={s.authPage} edges={['top', 'bottom']}><StatusBar barStyle="light-content" /><ScrollView contentContainerStyle={s.authWrap} keyboardShouldPersistTaps="handled"><View style={s.authLogo}><Ionicons name="layers" size={31} color="#14200B" /></View><Text style={s.authBrand}>MultiLive</Text><Text style={s.authTitle}>{authMode === 'login' ? 'Bon retour parmi nous.' : 'Crée ton compte.'}</Text><Text style={s.authSubtitle}>Tes connexions, tes données et tes futurs achats seront liés à ce compte.</Text>{authMode === 'register' && <TextInput value={authName} onChangeText={setAuthName} placeholder="Nom" placeholderTextColor="#718078" autoCapitalize="words" style={s.authInput} />}<TextInput value={authEmail} onChangeText={setAuthEmail} placeholder="Adresse e-mail" placeholderTextColor="#718078" keyboardType="email-address" autoCapitalize="none" autoCorrect={false} style={s.authInput} /><TextInput value={authPassword} onChangeText={setAuthPassword} placeholder="Mot de passe · 8 caractères minimum" placeholderTextColor="#718078" secureTextEntry autoCapitalize="none" style={s.authInput} />{authError ? <Text style={s.authError}>{authError}</Text> : null}<Pressable disabled={authBusy} onPress={() => { void submitAuth(); }} style={[s.authSubmit, authBusy && { opacity: 0.5 }]}><Text style={s.authSubmitText}>{authBusy ? 'Patiente…' : authMode === 'login' ? 'SE CONNECTER' : 'CRÉER MON COMPTE'}</Text></Pressable><Pressable onPress={() => { setAuthMode(value => value === 'login' ? 'register' : 'login'); setAuthError(''); }}><Text style={s.authSwitch}>{authMode === 'login' ? 'Nouveau ? Créer un compte MultiLive' : 'J’ai déjà un compte'}</Text></Pressable><Text style={s.authDev}>MODE DÉVELOPPEMENT · migration vers la base VPS à la fin</Text></ScrollView></SafeAreaView>;
   const filterTint = previewFilter === 'Chaud' ? '#FF8A3D2E' : previewFilter === 'Froid' ? '#398CFF30' : previewFilter === 'Éclat' ? '#FFF4D622' : previewFilter === 'Doux' ? '#FFB5C525' : previewFilter === 'Mono' ? '#8B93A04D' : 'transparent';
   if (screen === 'studio') return <SafeAreaView style={s.liveSafe} edges={['top', 'bottom']}><StatusBar barStyle="light-content" />
     <View style={s.liveStage}>
@@ -260,7 +272,7 @@ function StudioApp() {
       {showFilters && <View style={s.filterDrawer}><Text style={s.drawerTitle}>FILTRES MULTILIVE</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.liveFilterRow}>{(['Naturel', 'Éclat', 'Doux', 'Chaud', 'Froid', 'Mono'] as PreviewFilter[]).map(filter => <Pressable key={filter} onPress={() => setPreviewFilter(filter)} style={s.liveFilterItem}><View style={[s.filterPreview, previewFilter === filter && s.filterPreviewOn, { backgroundColor: filter === 'Chaud' ? '#C97341' : filter === 'Froid' ? '#4777A8' : filter === 'Éclat' ? '#E4C777' : filter === 'Doux' ? '#C77B8C' : filter === 'Mono' ? '#777' : '#8E9B86' }]}><Ionicons name="person" size={23} color="#fff" /></View><Text style={[s.liveFilterText, previewFilter === filter && { color: '#BAF473' }]}>{filter}</Text></Pressable>)}</ScrollView></View>}
       <View style={s.liveBottom}>
         <Pressable accessibilityLabel="Couper ou activer la caméra" onPress={() => camera ? setCamera(false) : void enableCamera()} style={s.bottomRound}><Ionicons name={camera ? 'videocam' : 'videocam-off'} size={23} color="#fff" /></Pressable>
-        {!running ? <Pressable disabled={!ready || !count || used >= LIMIT} onPress={start} style={s.goLive}><Text style={s.goLiveText}>DÉMARRER LE TEST</Text></Pressable> : <>
+        {!running ? <Pressable disabled={!count} onPress={start} style={s.goLive}><Text style={s.goLiveText}>DÉMARRER LE TEST</Text></Pressable> : <>
           <Pressable accessibilityLabel={paused ? 'Reprendre le test' : 'Mettre le test en pause'} onPress={paused ? resume : pause} style={s.pauseLive}><Ionicons name={paused ? 'play' : 'pause'} size={21} color="#14200B" /><Text style={s.pauseLiveText}>{paused ? 'REPRENDRE' : 'PAUSE'}</Text></Pressable>
           <Pressable accessibilityLabel="Arrêter le test" onPress={stop} style={s.endLive}><Ionicons name="stop" size={20} color="#fff" /><Text style={s.endLiveText}>ARRÊTER</Text></Pressable>
         </>}
@@ -274,24 +286,39 @@ function StudioApp() {
     <ScrollView style={s.flex} contentContainerStyle={s.page}>
       {screen === 'home' && <>
         <Text style={s.kicker}>CRÉE. CONNECTE. PARTAGE.</Text><Text style={s.hero}>{'Un seul studio.\nTous tes réseaux.'}</Text><Text style={s.description}>Prépare ton prochain live depuis ton iPhone. Aujourd’hui, on répète en mode test.</Text>
-        <View style={[s.card, s.limeCard]}><View style={s.row}><Text style={s.darkLabel}>TON ESSAI DU JOUR</Text><Ionicons name="time-outline" size={23} color="#14200B" /></View><View style={s.quotaRow}><Text style={s.quota}>{clock(LIMIT - used)}</Text><Text style={s.darkSub}>restantes / 20 min</Text></View><View style={s.track}><View style={[s.progress, { width: ((LIMIT - used) / LIMIT * 100) + '%' as `${number}%` }]} /></View><Text style={s.darkSub}>Compteur de simulation · aucun paiement</Text></View>
+        <View style={[s.card, s.limeCard]}><View style={s.row}><Text style={s.darkLabel}>ACCÈS AU PROTOTYPE</Text><Ionicons name="infinite-outline" size={27} color="#14200B" /></View><View style={s.quotaRow}><Text style={s.quota}>ILLIMITÉ</Text></View><Text style={s.darkSub}>Aucune limite de temps · aucun paiement activé</Text></View>
         <View style={s.row}><Text style={s.section}>Tes destinations</Text><Text style={s.accent}>{count}/3 sélectionnées</Text></View>
         {NETWORKS.map(n => <View key={n.id} style={[s.network, connected(n.id) && { borderColor: n.color + '80' }]}><View style={[s.icon, { backgroundColor: n.color + '20' }]}><Ionicons name={n.icon} size={25} color={n.color} /></View><View style={s.flex}><Text style={s.networkName}>{n.name}</Text><Text style={[s.muted, connected(n.id) && { color: '#BAF473' }]}>{accountLabel(n.id)}</Text><Pressable accessibilityRole="button" disabled={connecting !== null} onPress={() => { void connectNetwork(n.id); }} style={s.connectButton}><Text style={s.connectText}>{connecting === n.id ? 'Connexion…' : connected(n.id) ? 'Reconnecter' : 'Connecter le compte'}</Text></Pressable></View><Switch accessibilityLabel={'Sélectionner ' + n.name + ' pour la simulation'} value={selected[n.id]} onValueChange={value => setSelected(v => ({ ...v, [n.id]: value }))} trackColor={{ false: '#303541', true: n.color }} /></View>)}
         {button('Ouvrir mon studio  →', () => go('studio'))}<Text style={s.footnote}>Les destinations de test ne reflètent pas une autorisation de diffusion réelle.</Text>
       </>}
       {screen === 'settings' && <>
         <Text style={s.kicker}>TON ESPACE</Text><Text style={s.hero}>{'Tout commence\npar une répétition.'}</Text>
+        <View style={s.card}><Text style={s.section}>{user.name}</Text><Text style={s.description}>{user.email}</Text><Text style={s.muted}>Compte MultiLive · formule développement</Text></View>
         <View style={s.card}><Text style={s.section}>Mes comptes</Text>{NETWORKS.map(n => <View key={n.id} style={s.row}><Text style={s.description}>{n.name}</Text><Text style={[s.muted, connected(n.id) && { color: '#BAF473' }]}>{accountLabel(n.id)}</Text></View>)}{button('Gérer mes connexions', () => go('home'), true)}</View>
-        <View style={s.card}><Text style={s.section}>20 minutes offertes par jour</Text><Text style={s.description}>On teste le compteur. Aucun abonnement ni paiement activé.</Text><Text style={s.muted}>Compteur local au téléphone, pas une protection commerciale.</Text></View>
-        <View style={s.card}><Text style={s.section}>Ta confidentialité</Text><Text style={s.description}>Aucun mot de passe demandé. Aucune vidéo enregistrée ou envoyée pendant la simulation.</Text><Text style={s.muted}>Seul le temps de test est mémorisé sur cet appareil.</Text></View>
+        <View style={s.card}><Text style={s.section}>Prototype sans limite</Text><Text style={s.description}>Tu peux tester le studio aussi longtemps que nécessaire.</Text><Text style={s.muted}>Aucun abonnement ni paiement activé pour le moment.</Text></View>
+        <View style={s.card}><Text style={s.section}>Ta confidentialité</Text><Text style={s.description}>Ton mot de passe est transformé en empreinte sécurisée et n’est jamais lisible. Aucune vidéo n’est enregistrée pendant la simulation.</Text><Text style={s.muted}>Pendant le développement, les données du compte sont temporaires sur Render.</Text></View>
+        <View style={s.card}><Text style={s.section}>Historique des paiements</Text><Text style={s.description}>{user.payments.length ? `${user.payments.length} paiement(s) enregistré(s).` : 'Aucun paiement pour le moment.'}</Text><Text style={s.muted}>Les paiements seront activés uniquement lorsque l’application sera terminée.</Text></View>
+        {button('Se déconnecter', () => { void logout(); }, true)}
       </>}
-      {storageError && <Text style={s.warning}>Le temps de test ne peut pas être mémorisé sur cet appareil.</Text>}
     </ScrollView>
     <View style={s.nav}>{([{ id: 'home', title: 'Accueil', icon: 'grid-outline' }, { id: 'studio', title: 'Studio', icon: 'videocam-outline' }, { id: 'settings', title: 'Mon espace', icon: 'person-circle-outline' }] as const).map(tab => <Pressable key={tab.id} accessibilityRole="tab" accessibilityState={{ selected: screen === tab.id }} onPress={() => go(tab.id)} style={s.navItem}><Ionicons name={tab.icon} size={23} color={screen === tab.id ? '#BAF473' : '#818996'} /><Text style={[s.navText, screen === tab.id && { color: '#BAF473' }]}>{tab.title}</Text></Pressable>)}</View>
   </SafeAreaView>;
 }
 export default function App() { return <SafeAreaProvider><StudioApp /></SafeAreaProvider>; }
 const s = StyleSheet.create({
+  authPage: { flex: 1, backgroundColor: '#0C100E' },
+  authWrap: { flexGrow: 1, width: '100%', maxWidth: 500, alignSelf: 'center', justifyContent: 'center', padding: 26, gap: 14 },
+  authLogo: { width: 62, height: 62, borderRadius: 21, backgroundColor: '#BAF473', alignItems: 'center', justifyContent: 'center', marginBottom: 3 },
+  authBrand: { color: '#BAF473', fontSize: 14, fontWeight: '900', letterSpacing: 2 },
+  authTitle: { color: '#F5F6F3', fontSize: 34, lineHeight: 39, fontWeight: '900', letterSpacing: -1 },
+  authSubtitle: { color: '#9DA79F', fontSize: 14, lineHeight: 21, marginBottom: 9 },
+  authInput: { minHeight: 55, borderRadius: 17, borderWidth: 1, borderColor: '#344038', backgroundColor: '#151B17', color: '#FFFFFF', paddingHorizontal: 16, fontSize: 15 },
+  authSubmit: { minHeight: 56, borderRadius: 18, backgroundColor: '#BAF473', alignItems: 'center', justifyContent: 'center', marginTop: 3 },
+  authSubmitText: { color: '#14200B', fontSize: 13, fontWeight: '900', letterSpacing: 0.7 },
+  authSwitch: { color: '#BAF473', fontSize: 13, fontWeight: '800', textAlign: 'center', paddingVertical: 9 },
+  authError: { color: '#FF8199', fontSize: 12, lineHeight: 18 },
+  authDev: { color: '#69756D', fontSize: 9, textAlign: 'center', letterSpacing: 0.7, marginTop: 7 },
+  authLoading: { color: '#BAF473', fontSize: 15, fontWeight: '800', margin: 'auto' },
   liveSafe: { flex: 1, backgroundColor: '#050706' },
   liveStage: { flex: 1, backgroundColor: '#0C110E', overflow: 'hidden' },
   fullCameraPlaceholder: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center', gap: 15, backgroundColor: '#111A14' },

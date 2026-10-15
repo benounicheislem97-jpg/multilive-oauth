@@ -14,12 +14,14 @@ const CONFIG_FILE = path.join(PRIVATE_DIR, 'tiktok-oauth-config.json');
 const TOKEN_FILE = path.join(PRIVATE_DIR, 'tiktok-oauth-tokens.json');
 const META_CONFIG_FILE = path.join(PRIVATE_DIR, 'meta-oauth-config.json');
 const META_TOKEN_FILE = path.join(PRIVATE_DIR, 'meta-oauth-tokens.json');
+const USERS_FILE = path.join(PRIVATE_DIR, 'multilive-users.json');
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${PORT}`).replace(/\/$/, '');
 const REDIRECT_URI = process.env.TIKTOK_REDIRECT_URI || `${PUBLIC_BASE_URL}/auth/tiktok/callback/`;
 const META_REDIRECT_URI = `${PUBLIC_BASE_URL}/auth/meta/callback/`;
 const pending = new Map();
 const metaExchanges = new Map();
 const mobileHandoffs = new Map();
+const authSessions = new Map();
 const secureCookie = PUBLIC_BASE_URL.startsWith('https:') ? '; Secure' : '';
 const liveRooms = new Map();
 
@@ -49,6 +51,45 @@ function cookies(req) {
 function send(res, status, type, body) {
   res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
   res.end(body);
+}
+
+async function jsonBody(req) {
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk;
+    if (body.length > 32000) throw new Error('Requête trop volumineuse');
+  }
+  return JSON.parse(body || '{}');
+}
+
+function readUsers() {
+  try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch { return []; }
+}
+
+function writeUsers(users) {
+  fs.mkdirSync(PRIVATE_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), { mode: 0o600 });
+}
+
+function passwordHash(password, salt) {
+  return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+function publicUser(user) {
+  return { id: user.id, name: user.name, email: user.email, plan: user.plan || 'development', payments: user.payments || [], createdAt: user.createdAt };
+}
+
+function authUser(req) {
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const session = authSessions.get(token);
+  if (!session || session.expiresAt < Date.now()) { authSessions.delete(token); return null; }
+  return readUsers().find(user => user.id === session.userId) || null;
+}
+
+function createAuthSession(user) {
+  const token = randomString(48);
+  authSessions.set(token, { userId: user.id, expiresAt: Date.now() + 30 * 86400000 });
+  return token;
 }
 
 function page(title, body) {
@@ -150,6 +191,44 @@ async function instagramAccounts(session, pageId) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
+
+  if (req.method === 'POST' && url.pathname === '/api/auth/register') {
+    try {
+      const body = await jsonBody(req);
+      const name = String(body.name || '').trim().slice(0, 60);
+      const email = String(body.email || '').trim().toLowerCase();
+      const password = String(body.password || '');
+      if (name.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8) return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Nom, e-mail valide et mot de passe de 8 caractères minimum requis.' }));
+      const users = readUsers();
+      if (users.some(user => user.email === email)) return send(res, 409, 'application/json; charset=utf-8', JSON.stringify({ error: 'Un compte utilise déjà cet e-mail.' }));
+      const salt = crypto.randomBytes(16).toString('hex');
+      const user = { id: randomString(16), name, email, salt, passwordHash: passwordHash(password, salt), plan: 'development', payments: [], createdAt: new Date().toISOString() };
+      users.push(user); writeUsers(users);
+      return send(res, 201, 'application/json; charset=utf-8', JSON.stringify({ token: createAuthSession(user), user: publicUser(user) }));
+    } catch { return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Données invalides.' })); }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/auth/login') {
+    try {
+      const body = await jsonBody(req);
+      const email = String(body.email || '').trim().toLowerCase();
+      const password = String(body.password || '');
+      const user = readUsers().find(item => item.email === email);
+      const valid = user && crypto.timingSafeEqual(Buffer.from(passwordHash(password, user.salt), 'hex'), Buffer.from(user.passwordHash, 'hex'));
+      if (!valid) return send(res, 401, 'application/json; charset=utf-8', JSON.stringify({ error: 'E-mail ou mot de passe incorrect.' }));
+      return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ token: createAuthSession(user), user: publicUser(user) }));
+    } catch { return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Connexion impossible.' })); }
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/auth/me') {
+    const user = authUser(req);
+    return user ? send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ user: publicUser(user) })) : send(res, 401, 'application/json; charset=utf-8', JSON.stringify({ error: 'Session expirée.' }));
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
+    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, ''); authSessions.delete(token);
+    return send(res, 204, 'text/plain; charset=utf-8', '');
+  }
 
   if (req.method === 'GET' && url.pathname === '/api/mobile/exchange') {
     const code = url.searchParams.get('code');

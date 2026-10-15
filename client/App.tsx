@@ -14,7 +14,7 @@ type Network = 'instagram' | 'tiktok' | 'facebook';
 type PreviewFilter = 'Naturel' | 'Éclat' | 'Doux' | 'Chaud' | 'Froid' | 'Mono';
 type DemoComment = { id: number; user: string; text: string };
 type MultiLiveUser = { id: string; name: string; email: string; plan: string; payments: { id: string; amount: number; date: string }[] };
-type Connections = { facebook: boolean; instagram: { id?: string; username?: string }[]; tiktok: boolean };
+type Connections = { facebook: boolean; instagram: { id?: string; username?: string }[]; instagramAuthorized?: boolean; tiktok: boolean };
 const NETWORKS: { id: Network; name: string; color: string; icon: React.ComponentProps<typeof Ionicons>['name'] }[] = [
   { id: 'instagram', name: 'Instagram', color: '#F078C1', icon: 'logo-instagram' },
   { id: 'tiktok', name: 'TikTok', color: '#6DE4DF', icon: 'logo-tiktok' },
@@ -61,7 +61,7 @@ function StudioApp() {
   const [comments, setComments] = useState<DemoComment[]>([]);
   const [viewerCount, setViewerCount] = useState(0);
   const commentCounter = useRef(0);
-  const [connections, setConnections] = useState<Connections>({ facebook: false, instagram: [], tiktok: false });
+  const [connections, setConnections] = useState<Connections>({ facebook: false, instagram: [], instagramAuthorized: false, tiktok: false });
   const [connecting, setConnecting] = useState<Network | null>(null);
   const [user, setUser] = useState<MultiLiveUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -169,7 +169,7 @@ function StudioApp() {
       const previous: Connections = stored ? JSON.parse(stored) : connections;
       const updated: Connections = data.platform === 'tiktok'
         ? { ...previous, tiktok: true }
-        : { ...previous, facebook: Boolean(data.connections.facebook), instagram: data.connections.instagram || [] };
+        : { ...previous, facebook: Boolean(data.connections.facebook), instagram: data.connections.instagram || [], instagramAuthorized: data.platform === 'instagram' ? true : previous.instagramAuthorized };
       setConnections(updated);
       await AsyncStorage.setItem(CONNECTION_STORE, JSON.stringify(updated));
       return updated;
@@ -201,7 +201,8 @@ function StudioApp() {
       const network = requestedNetwork || data.platform as Network;
       if (network) setSelected(current => ({ ...current, [network]: true }));
       setScreen('home');
-      Alert.alert('Compte connecté', network === 'instagram' && updated.instagram[0]?.username ? `@${updated.instagram[0].username} est maintenant relié à MultiLive.` : `${NETWORKS.find(item => item.id === network)?.name || 'Le compte'} est maintenant relié à MultiLive.`);
+      if (network === 'instagram' && !updated.instagram.length) Alert.alert('Autorisation Instagram reçue', 'Meta a accepté la connexion, mais aucun compte Instagram professionnel lié à une Page Facebook n’a été détecté. Relie ton compte Instagram Créateur/Entreprise à ta Page Facebook, puis reconnecte-le.');
+      else Alert.alert('Compte connecté', network === 'instagram' && updated.instagram[0]?.username ? `@${updated.instagram[0].username} est maintenant relié à MultiLive.` : `${NETWORKS.find(item => item.id === network)?.name || 'Le compte'} est maintenant relié à MultiLive.`);
     } catch (error) {
       Alert.alert('Connexion incomplète', error instanceof Error ? error.message : 'Réessaie dans quelques instants.');
     }
@@ -242,7 +243,7 @@ function StudioApp() {
     await AsyncStorage.removeItem(AUTH_TOKEN_STORE); setUser(null); setScreen('home');
   }
   const connected = (network: Network) => network === 'facebook' ? connections.facebook : network === 'instagram' ? connections.instagram.length > 0 : connections.tiktok;
-  const accountLabel = (network: Network) => network === 'instagram' && connections.instagram[0]?.username ? `@${connections.instagram[0].username}` : connected(network) ? 'Compte connecté ✓' : 'Compte non connecté';
+  const accountLabel = (network: Network) => network === 'instagram' && connections.instagram[0]?.username ? `@${connections.instagram[0].username}` : network === 'instagram' && connections.instagramAuthorized ? 'Autorisé · compte professionnel introuvable' : connected(network) ? 'Compte connecté ✓' : 'Compte non connecté';
   function go(next: Screen) { if (next !== 'studio') { stop(); setCamera(false); } setScreen(next); }
   const button = (label: string, action: () => void, secondary = false, disabled = false) => <Pressable accessibilityRole="button" disabled={disabled} onPress={action} style={({ pressed }) => [s.button, secondary && s.secondary, (pressed || disabled) && { opacity: 0.5 }]}><Text style={[s.buttonText, secondary && { color: '#F3F4F6' }]}>{label}</Text></Pressable>;
   if (!authReady) return <SafeAreaView style={s.authPage}><StatusBar barStyle="light-content" /><Text style={s.authLoading}>Ouverture de MultiLive…</Text></SafeAreaView>;

@@ -12,8 +12,8 @@ const CONFIG_FILE = path.join(PRIVATE_DIR, 'tiktok-oauth-config.json');
 const TOKEN_FILE = path.join(PRIVATE_DIR, 'tiktok-oauth-tokens.json');
 const META_CONFIG_FILE = path.join(PRIVATE_DIR, 'meta-oauth-config.json');
 const META_TOKEN_FILE = path.join(PRIVATE_DIR, 'meta-oauth-tokens.json');
-const REDIRECT_URI = `http://127.0.0.1:${PORT}/auth/tiktok/callback/`;
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${PORT}`).replace(/\/$/, '');
+const REDIRECT_URI = process.env.TIKTOK_REDIRECT_URI || `${PUBLIC_BASE_URL}/auth/tiktok/callback/`;
 const META_REDIRECT_URI = `${PUBLIC_BASE_URL}/auth/meta/callback/`;
 const pending = new Map();
 const metaExchanges = new Map();
@@ -52,6 +52,9 @@ function page(title, body) {
 }
 
 function readConfig() {
+  if (process.env.TIKTOK_CLIENT_KEY && process.env.TIKTOK_CLIENT_SECRET) {
+    return { client_key: process.env.TIKTOK_CLIENT_KEY, client_secret: process.env.TIKTOK_CLIENT_SECRET };
+  }
   try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch { return null; }
 }
 

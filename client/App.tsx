@@ -9,14 +9,13 @@ import * as WebBrowser from 'expo-web-browser';
 
 WebBrowser.maybeCompleteAuthSession();
 
-type Screen = 'home' | 'studio' | 'settings' | 'subscription' | 'admin';
+type Screen = 'home' | 'studio' | 'settings' | 'subscription';
 type Network = 'instagram' | 'tiktok' | 'facebook';
 type PreviewFilter = 'Naturel' | 'Éclat' | 'Doux' | 'Chaud' | 'Froid' | 'Mono';
 type VirtualBackground = 'Réel' | 'Flou' | 'Mur blanc' | 'Bureau';
 type DemoComment = { id: number; user: string; text: string };
 type Subscription = { plan: string; status: 'development' | 'active' | 'expired' | 'cancelled'; startedAt?: string; endsAt?: string; autoRenew: boolean };
 type MultiLiveUser = { id: string; name: string; email: string; role?: 'admin' | 'user'; status?: 'active' | 'suspended' | 'blocked'; plan: string; subscription?: Subscription; payments: { id: string; amount: number; currency?: string; date: string; status?: string }[]; createdAt?: string; lastSeenAt?: string; connected?: boolean };
-type AdminStats = { total: number; connected: number; active: number; suspended: number; blocked: number; paid: number };
 type Connections = { facebook: boolean; instagram: { id?: string; username?: string }[]; instagramAuthorized?: boolean; tiktok: boolean };
 const NETWORKS: { id: Network; name: string; color: string; icon: React.ComponentProps<typeof Ionicons>['name'] }[] = [
   { id: 'instagram', name: 'Instagram', color: '#F078C1', icon: 'logo-instagram' },
@@ -127,11 +126,6 @@ function StudioApp() {
   const [authPassword, setAuthPassword] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
-  const [adminUsers, setAdminUsers] = useState<MultiLiveUser[]>([]);
-  const [adminStats, setAdminStats] = useState<AdminStats>({ total: 0, connected: 0, active: 0, suspended: 0, blocked: 0, paid: 0 });
-  const [adminSearch, setAdminSearch] = useState('');
-  const [adminError, setAdminError] = useState('');
-  const [adminBusy, setAdminBusy] = useState('');
   const startAt = useRef(0);
   const elapsedBase = useRef(0);
   const count = NETWORKS.filter(n => selected[n.id]).length;
@@ -157,7 +151,6 @@ function StudioApp() {
     }, 45000);
     return () => clearInterval(heartbeat);
   }, [user?.id]);
-  useEffect(() => { if (screen === 'admin' && user?.role === 'admin') void loadAdmin(); }, [screen, user?.role]);
   useEffect(() => {
     AsyncStorage.getItem(CONNECTION_STORE).then(raw => {
       if (raw) setConnections(JSON.parse(raw));
@@ -318,23 +311,6 @@ function StudioApp() {
     if (token) await fetch(`${AUTH_BASE}/api/auth/logout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
     await AsyncStorage.multiRemove([AUTH_TOKEN_STORE, AUTH_USER_STORE]); setUser(null); setScreen('home');
   }
-  async function loadAdmin() {
-    setAdminError('');
-    const token = await AsyncStorage.getItem(AUTH_TOKEN_STORE);
-    const response = await fetch(`${AUTH_BASE}/api/admin/users`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => null);
-    if (!response?.ok) return setAdminError(response ? (await response.json()).error || 'Chargement impossible.' : 'Serveur indisponible.');
-    const data = await response.json(); setAdminUsers(data.users); setAdminStats(data.stats);
-  }
-  async function updateAdminUser(targetId: string, changes: Record<string, unknown>) {
-    setAdminBusy(targetId); setAdminError('');
-    try {
-      const token = await AsyncStorage.getItem(AUTH_TOKEN_STORE);
-      const response = await fetch(`${AUTH_BASE}/api/admin/users/${targetId}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(changes) });
-      const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Modification impossible.');
-      await loadAdmin();
-    } catch (error) { setAdminError(error instanceof Error ? error.message : 'Modification impossible.'); }
-    finally { setAdminBusy(''); }
-  }
   const connected = (network: Network) => network === 'facebook' ? connections.facebook : network === 'instagram' ? connections.instagram.length > 0 : connections.tiktok;
   const subscription: Subscription = user?.subscription || { plan: user?.plan || 'development', status: 'development', startedAt: user?.id ? new Date().toISOString() : undefined, autoRenew: false };
   const subscriptionStatus = subscription.status === 'active' ? 'Actif' : subscription.status === 'expired' ? 'Expiré' : subscription.status === 'cancelled' ? 'Annulé' : 'Développement';
@@ -406,15 +382,8 @@ function StudioApp() {
         <View style={s.card}><Text style={s.section}>Historique</Text>{user.payments.length ? user.payments.map(payment => <View key={payment.id} style={s.detailRow}><View><Text style={s.detailValue}>{payment.amount} {payment.currency || 'DZD'}</Text><Text style={s.muted}>{dateLabel(payment.date)}</Text></View><Text style={s.paymentOk}>{payment.status === 'failed' ? 'Échoué' : 'Payé'}</Text></View>) : <Text style={s.description}>Aucun paiement pour le moment.</Text>}</View>
         {button('Retour à mon espace', () => go('settings'), true)}
       </>}
-      {screen === 'admin' && user.role === 'admin' && <>
-        <Text style={s.kicker}>ADMINISTRATION</Text><Text style={s.hero}>{'Pilote toute\nl’application.'}</Text>
-        <View style={s.statsGrid}><View style={s.statCard}><Text style={s.statNumber}>{adminStats.total}</Text><Text style={s.statLabel}>INSCRITS</Text></View><View style={s.statCard}><Text style={s.statNumber}>{adminStats.connected}</Text><Text style={s.statLabel}>CONNECTÉS</Text></View><View style={s.statCard}><Text style={s.statNumber}>{adminStats.paid}</Text><Text style={s.statLabel}>OFFRE PRO</Text></View><View style={s.statCard}><Text style={s.statNumber}>{adminStats.suspended + adminStats.blocked}</Text><Text style={s.statLabel}>RESTREINTS</Text></View></View>
-        <TextInput value={adminSearch} onChangeText={setAdminSearch} placeholder="Rechercher un nom ou un e-mail" placeholderTextColor="#718078" autoCapitalize="none" style={s.authInput} />
-        {adminError ? <Text style={s.authError}>{adminError}</Text> : null}
-        {adminUsers.filter(item => `${item.name} ${item.email}`.toLowerCase().includes(adminSearch.toLowerCase())).map(item => <View key={item.id} style={s.adminUserCard}><View style={s.row}><View style={s.flex}><Text style={s.networkName}>{item.name}</Text><Text style={s.muted}>{item.email}</Text></View><View style={[s.statusPill, item.status === 'blocked' && s.statusBlocked, item.status === 'suspended' && s.statusSuspended]}><Text style={s.statusPillText}>{item.connected ? '● EN LIGNE' : (item.status || 'active').toUpperCase()}</Text></View></View><View style={s.detailRow}><Text style={s.muted}>Offre</Text><Text style={s.detailValue}>{item.plan === 'development' ? 'Développement' : item.plan.toUpperCase()}</Text></View><Text style={s.adminLabel}>ATTRIBUER UNE OFFRE</Text><View style={s.actionWrap}><Pressable disabled={adminBusy === item.id} onPress={() => void updateAdminUser(item.id, { plan: 'development' })} style={s.adminAction}><Text style={s.adminActionText}>Développement</Text></Pressable><Pressable disabled={adminBusy === item.id} onPress={() => void updateAdminUser(item.id, { plan: 'free' })} style={s.adminAction}><Text style={s.adminActionText}>Gratuit</Text></Pressable><Pressable disabled={adminBusy === item.id} onPress={() => void updateAdminUser(item.id, { plan: 'pro', durationMonths: 1 })} style={s.adminAction}><Text style={s.adminActionText}>Pro 1 mois</Text></Pressable><Pressable disabled={adminBusy === item.id} onPress={() => void updateAdminUser(item.id, { plan: 'pro', durationMonths: 3 })} style={s.adminAction}><Text style={s.adminActionText}>Pro 3 mois</Text></Pressable><Pressable disabled={adminBusy === item.id} onPress={() => void updateAdminUser(item.id, { plan: 'pro', durationMonths: 12 })} style={s.adminAction}><Text style={s.adminActionText}>Pro 12 mois</Text></Pressable></View><Text style={s.adminLabel}>ACCÈS AU COMPTE</Text><View style={s.actionWrap}><Pressable disabled={adminBusy === item.id} onPress={() => void updateAdminUser(item.id, { status: 'active' })} style={[s.adminAction, s.allowAction]}><Text style={s.allowActionText}>Autoriser</Text></Pressable><Pressable disabled={adminBusy === item.id} onPress={() => void updateAdminUser(item.id, { status: 'suspended' })} style={[s.adminAction, s.suspendAction]}><Text style={s.adminActionText}>Suspendre</Text></Pressable><Pressable disabled={adminBusy === item.id} onPress={() => void updateAdminUser(item.id, { status: 'blocked' })} style={[s.adminAction, s.blockAction]}><Text style={s.adminActionText}>Bloquer</Text></Pressable></View>{adminBusy === item.id && <Text style={s.muted}>Mise à jour…</Text>}</View>)}
-      </>}
     </ScrollView>
-    <View style={s.nav}>{([...([{ id: 'home', title: 'Accueil', icon: 'grid-outline' }, { id: 'studio', title: 'Studio', icon: 'videocam-outline' }, { id: 'settings', title: 'Mon espace', icon: 'person-circle-outline' }] as const), ...(user.role === 'admin' ? [{ id: 'admin' as const, title: 'Admin', icon: 'shield-checkmark-outline' as const }] : [])]).map(tab => <Pressable key={tab.id} accessibilityRole="tab" accessibilityState={{ selected: screen === tab.id }} onPress={() => go(tab.id)} style={s.navItem}><Ionicons name={tab.icon} size={23} color={screen === tab.id ? '#BAF473' : '#818996'} /><Text style={[s.navText, screen === tab.id && { color: '#BAF473' }]}>{tab.title}</Text></Pressable>)}</View>
+    <View style={s.nav}>{([{ id: 'home', title: 'Accueil', icon: 'grid-outline' }, { id: 'studio', title: 'Studio', icon: 'videocam-outline' }, { id: 'settings', title: 'Mon espace', icon: 'person-circle-outline' }] as const).map(tab => <Pressable key={tab.id} accessibilityRole="tab" accessibilityState={{ selected: screen === tab.id }} onPress={() => go(tab.id)} style={s.navItem}><Ionicons name={tab.icon} size={23} color={screen === tab.id ? '#BAF473' : '#818996'} /><Text style={[s.navText, screen === tab.id && { color: '#BAF473' }]}>{tab.title}</Text></Pressable>)}</View>
   </SafeAreaView>;
 }
 export default function App() { return <SafeAreaProvider><StudioApp /></SafeAreaProvider>; }

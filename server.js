@@ -216,6 +216,10 @@ async function instagramAccounts(session, pageId) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
 
+  if (req.method === 'GET' && url.pathname === '/admin') {
+    res.writeHead(302, { Location: '/admin/', 'Cache-Control': 'no-store' }); res.end(); return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/auth/register') {
     try {
       const body = await jsonBody(req);

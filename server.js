@@ -15,6 +15,7 @@ const TOKEN_FILE = path.join(PRIVATE_DIR, 'tiktok-oauth-tokens.json');
 const META_CONFIG_FILE = path.join(PRIVATE_DIR, 'meta-oauth-config.json');
 const META_TOKEN_FILE = path.join(PRIVATE_DIR, 'meta-oauth-tokens.json');
 const USERS_FILE = path.join(PRIVATE_DIR, 'multilive-users.json');
+const ADMIN_EMAILS = new Set(String(process.env.ADMIN_EMAILS || '').split(',').map(email => email.trim().toLowerCase()).filter(Boolean));
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${PORT}`).replace(/\/$/, '');
 const REDIRECT_URI = process.env.TIKTOK_REDIRECT_URI || `${PUBLIC_BASE_URL}/auth/tiktok/callback/`;
 const META_REDIRECT_URI = `${PUBLIC_BASE_URL}/auth/meta/callback/`;
@@ -67,7 +68,8 @@ function readUsers() {
     const users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
     let changed = false;
     users.forEach((user, index) => {
-      if (!user.role) { user.role = index === 0 ? 'admin' : 'user'; changed = true; }
+      const shouldBeAdmin = ADMIN_EMAILS.has(String(user.email).toLowerCase()) || (ADMIN_EMAILS.size === 0 && index === 0);
+      if (user.role !== (shouldBeAdmin ? 'admin' : 'user')) { user.role = shouldBeAdmin ? 'admin' : 'user'; changed = true; }
       if (!user.status) { user.status = 'active'; changed = true; }
     });
     if (users.length && !users.some(user => user.role === 'admin')) { users[0].role = 'admin'; changed = true; }
@@ -231,7 +233,7 @@ const server = http.createServer(async (req, res) => {
       if (users.some(user => user.email === email)) return send(res, 409, 'application/json; charset=utf-8', JSON.stringify({ error: 'Un compte utilise déjà cet e-mail.' }));
       const salt = crypto.randomBytes(16).toString('hex');
       const createdAt = new Date().toISOString();
-      const user = { id: randomString(16), name, email, salt, passwordHash: passwordHash(password, salt), role: users.length === 0 ? 'admin' : 'user', status: 'active', plan: 'development', subscription: { plan: 'development', status: 'development', startedAt: createdAt, autoRenew: false }, payments: [], createdAt, lastSeenAt: createdAt };
+      const user = { id: randomString(16), name, email, salt, passwordHash: passwordHash(password, salt), role: ADMIN_EMAILS.has(email) || (ADMIN_EMAILS.size === 0 && users.length === 0) ? 'admin' : 'user', status: 'active', plan: 'development', subscription: { plan: 'development', status: 'development', startedAt: createdAt, autoRenew: false }, payments: [], createdAt, lastSeenAt: createdAt };
       users.push(user); writeUsers(users);
       return send(res, 201, 'application/json; charset=utf-8', JSON.stringify({ token: createAuthSession(user), user: publicUser(user) }));
     } catch { return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Données invalides.' })); }

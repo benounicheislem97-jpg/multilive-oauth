@@ -48,7 +48,9 @@ function harness(sharedFiles = new Map(), pages = []) {
 test('restart, prefetch, duplicate POST and refresh do not consume the code twice', async () => {
   const first = harness();
   const login = await first.request('/oauth/meta');
-  const state = new URL(login.headers.Location).searchParams.get('state');
+  const authorization = new URL(login.headers.Location);
+  assert.equal(authorization.searchParams.get('scope'), 'public_profile,email,pages_show_list,pages_read_engagement,pages_manage_posts');
+  const state = authorization.searchParams.get('state');
   const cookie = login.headers['Set-Cookie'].split(';')[0];
   const app = harness(first.files); // Render restarted during login.
   const callback = '/auth/meta/callback/?' + new URLSearchParams({ code: 'fresh-test-code', state });

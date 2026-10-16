@@ -4,6 +4,8 @@ const path = require('path');
 const crypto = require('crypto');
 const querystring = require('querystring');
 const os = require('os');
+const { spawn } = require('child_process');
+const ffmpegPath = require('ffmpeg-static');
 const { WebSocketServer, WebSocket } = require('ws');
 
 const PORT = Number(process.env.PORT || 4320);
@@ -25,6 +27,7 @@ const mobileHandoffs = new Map();
 const authSessions = new Map();
 const secureCookie = PUBLIC_BASE_URL.startsWith('https:') ? '; Secure' : '';
 const liveRooms = new Map();
+const facebookLiveTickets = new Map();
 
 function signedValue(value, secret) {
   return `${value}.${crypto.createHmac('sha256', secret).update(value).digest('base64url')}`;
@@ -215,6 +218,33 @@ async function instagramAccounts(session, pageId) {
   return { accounts, pageCount: pages.length };
 }
 
+async function facebookPages(session) {
+  const endpoint = new URL('https://graph.facebook.com/v25.0/me/accounts');
+  endpoint.search = new URLSearchParams({
+    fields: 'id,name,access_token,picture{url}',
+    limit: '100',
+    appsecret_proof: crypto.createHmac('sha256', session.config.app_secret).update(session.tokens.access_token).digest('hex')
+  });
+  const response = await fetch(endpoint, { headers: { Authorization: `Bearer ${session.tokens.access_token}` } });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error?.message || 'Impossible de récupérer tes Pages Facebook.');
+  return (data.data || []).filter(page => page.id && page.access_token);
+}
+
+async function finishFacebookLive(liveId, pageToken) {
+  try {
+    const endpoint = new URL(`https://graph.facebook.com/v25.0/${liveId}`);
+    endpoint.search = new URLSearchParams({ access_token: pageToken, end_live_video: 'true' });
+    await fetch(endpoint, { method: 'POST' });
+  } catch {}
+}
+
+function facebookLiveError(error) {
+  const message = String(error?.message || error || 'Facebook a refusé la création du direct.');
+  if (/permissions|permission|pages_manage_posts|OAuth/i.test(message)) return 'Autorisation Facebook LIVE manquante. Reconnecte Facebook après avoir activé pages_manage_posts dans Meta.';
+  return message;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
 
@@ -323,6 +353,48 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ facebook: Boolean(session?.tokens.access_token), instagram: session?.tokens.instagramAccounts || [] }));
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/facebook/pages') {
+    const session = metaSession(req);
+    if (!session) return send(res, 401, 'application/json; charset=utf-8', JSON.stringify({ error: 'Reconnecte Facebook dans MultiLive.' }));
+    try {
+      const pages = await facebookPages(session);
+      return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ pages: pages.map(page => ({ id: page.id, name: page.name, picture: page.picture?.data?.url || '' })) }));
+    } catch (error) {
+      return send(res, 502, 'application/json; charset=utf-8', JSON.stringify({ error: facebookLiveError(error) }));
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/facebook/live') {
+    const session = metaSession(req);
+    if (!session) return send(res, 401, 'application/json; charset=utf-8', JSON.stringify({ error: 'Reconnecte Facebook dans MultiLive.' }));
+    try {
+      const body = await jsonBody(req);
+      const pageId = String(body.pageId || '');
+      const title = String(body.title || 'Direct MultiLive').trim().slice(0, 100) || 'Direct MultiLive';
+      if (!/^\d{1,30}$/.test(pageId)) return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Choisis une Page Facebook.' }));
+      const pages = await facebookPages(session);
+      const page = pages.find(item => item.id === pageId);
+      if (!page) return send(res, 403, 'application/json; charset=utf-8', JSON.stringify({ error: 'Cette Page Facebook n’est pas accessible.' }));
+      const endpoint = new URL(`https://graph.facebook.com/v25.0/${pageId}/live_videos`);
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ access_token: page.access_token, status: 'LIVE_NOW', title, description: title })
+      });
+      const live = await response.json();
+      if (!response.ok || live.error || !(live.secure_stream_url || live.stream_url) || !live.id) throw new Error(live.error?.message || 'Facebook n’a pas fourni d’adresse de diffusion.');
+      const ticket = randomString(40);
+      facebookLiveTickets.set(ticket, { liveId: String(live.id), pageId, pageToken: page.access_token, streamUrl: live.secure_stream_url || live.stream_url, createdAt: Date.now(), used: false });
+      setTimeout(() => {
+        const pendingLive = facebookLiveTickets.get(ticket);
+        if (pendingLive && !pendingLive.used) { facebookLiveTickets.delete(ticket); void finishFacebookLive(pendingLive.liveId, pendingLive.pageToken); }
+      }, 120000).unref();
+      return send(res, 201, 'application/json; charset=utf-8', JSON.stringify({ ticket, liveId: live.id, page: { id: page.id, name: page.name } }));
+    } catch (error) {
+      return send(res, 502, 'application/json; charset=utf-8', JSON.stringify({ error: facebookLiveError(error) }));
+    }
+  }
+
   if (req.method === 'GET' && url.pathname === '/instagram/accounts/') {
     const session = metaSession(req);
     if (!session) { res.writeHead(303, { Location: '/oauth/instagram' }); return res.end(); }
@@ -388,7 +460,7 @@ const server = http.createServer(async (req, res) => {
     const returnTo = safeMobileReturn(url.searchParams.get('return_to'));
     const returnPart = returnTo ? Buffer.from(returnTo).toString('base64url') : '';
     const state = signedValue(`${Date.now()}.${purpose}.${randomString(32)}.${returnPart}`, config.app_secret);
-    const scope = purpose === 'instagram' ? 'public_profile,instagram_basic,pages_show_list,pages_read_engagement' : 'public_profile,email';
+    const scope = purpose === 'instagram' ? 'public_profile,instagram_basic,pages_show_list,pages_read_engagement' : 'public_profile,email,pages_show_list,pages_read_engagement,pages_manage_posts';
     const params = new URLSearchParams({ client_id: config.app_id, redirect_uri: META_REDIRECT_URI, state, response_type: 'code', scope });
     if (purpose === 'instagram') params.set('auth_type', 'rerequest');
     res.writeHead(302, {
@@ -528,6 +600,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 const liveSocket = new WebSocketServer({ noServer: true });
+const facebookLiveSocket = new WebSocketServer({ noServer: true });
 function socketSend(socket, message) {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 }
@@ -540,8 +613,57 @@ function roomCode() {
 }
 if (typeof server.on === 'function') server.on('upgrade', (req, socket, head) => {
   const target = new URL(req.url, `http://127.0.0.1:${PORT}`);
-  if (target.pathname !== '/live-test/socket') return socket.destroy();
-  liveSocket.handleUpgrade(req, socket, head, ws => liveSocket.emit('connection', ws));
+  if (target.pathname === '/live-test/socket') return liveSocket.handleUpgrade(req, socket, head, ws => liveSocket.emit('connection', ws));
+  if (target.pathname === '/facebook-live/socket') return facebookLiveSocket.handleUpgrade(req, socket, head, ws => facebookLiveSocket.emit('connection', ws, req));
+  return socket.destroy();
+});
+
+facebookLiveSocket.on('connection', (socket, req) => {
+  const target = new URL(req.url, `http://127.0.0.1:${PORT}`);
+  const ticket = target.searchParams.get('ticket');
+  const live = facebookLiveTickets.get(ticket);
+  if (!live || live.used || Date.now() - live.createdAt > 120000) {
+    socketSend(socket, { type: 'error', message: 'Session Facebook expirée. Recommence le direct.' });
+    return socket.close();
+  }
+  live.used = true;
+  facebookLiveTickets.delete(ticket);
+  const inputFormat = String(target.searchParams.get('format') || 'mp4') === 'webm' ? 'webm' : 'mp4';
+  const args = [
+    '-hide_banner', '-loglevel', 'warning', '-fflags', '+genpts', '-f', inputFormat, '-i', 'pipe:0',
+    '-map', '0:v:0', '-map', '0:a:0?', '-vf', 'scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2',
+    '-r', '30', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-pix_fmt', 'yuv420p',
+    '-g', '60', '-keyint_min', '60', '-b:v', '1800k', '-maxrate', '1800k', '-bufsize', '3600k',
+    '-c:a', 'aac', '-ar', '44100', '-b:a', '128k', '-f', 'flv', live.streamUrl
+  ];
+  const encoder = spawn(ffmpegPath, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+  let finished = false;
+  const finish = message => {
+    if (finished) return;
+    finished = true;
+    if (!encoder.killed) encoder.kill('SIGTERM');
+    void finishFacebookLive(live.liveId, live.pageToken);
+    if (message) socketSend(socket, message);
+  };
+  encoder.stderr.on('data', data => {
+    const text = data.toString();
+    if (/error|failed|invalid|unable/i.test(text)) socketSend(socket, { type: 'encoder-warning', message: text.trim().slice(-350) });
+  });
+  encoder.on('spawn', () => socketSend(socket, { type: 'ready', liveId: live.liveId }));
+  encoder.on('error', error => finish({ type: 'error', message: `Encodeur indisponible : ${error.message}` }));
+  encoder.on('close', code => {
+    if (!finished && code !== 0) finish({ type: 'error', message: 'La transmission vers Facebook s’est arrêtée.' });
+  });
+  socket.on('message', (data, isBinary) => {
+    if (!isBinary) {
+      try { if (JSON.parse(data.toString()).type === 'stop') finish({ type: 'stopped' }); } catch {}
+      return;
+    }
+    if (!finished && encoder.stdin.writable && !encoder.stdin.write(data)) socket.pause?.();
+  });
+  encoder.stdin.on('drain', () => socket.resume?.());
+  socket.on('close', () => finish());
+  socket.on('error', () => finish());
 });
 liveSocket.on('connection', socket => {
   let membership = null;

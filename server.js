@@ -9,7 +9,7 @@ const { WebSocketServer, WebSocket } = require('ws');
 const PORT = Number(process.env.PORT || 4320);
 const ROOT = __dirname;
 const APP_DIR = path.join(ROOT, 'public');
-const PRIVATE_DIR = process.env.RENDER ? path.join(os.tmpdir(), 'multilive-private') : path.resolve(ROOT, '../../work');
+const PRIVATE_DIR = process.env.PRIVATE_DIR || (process.env.RENDER ? path.join(os.tmpdir(), 'multilive-private') : path.resolve(ROOT, '../../work'));
 const CONFIG_FILE = path.join(PRIVATE_DIR, 'tiktok-oauth-config.json');
 const TOKEN_FILE = path.join(PRIVATE_DIR, 'tiktok-oauth-tokens.json');
 const META_CONFIG_FILE = path.join(PRIVATE_DIR, 'meta-oauth-config.json');
@@ -63,7 +63,17 @@ async function jsonBody(req) {
 }
 
 function readUsers() {
-  try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch { return []; }
+  try {
+    const users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+    let changed = false;
+    users.forEach((user, index) => {
+      if (!user.role) { user.role = index === 0 ? 'admin' : 'user'; changed = true; }
+      if (!user.status) { user.status = 'active'; changed = true; }
+    });
+    if (users.length && !users.some(user => user.role === 'admin')) { users[0].role = 'admin'; changed = true; }
+    if (changed) writeUsers(users);
+    return users;
+  } catch { return []; }
 }
 
 function writeUsers(users) {
@@ -76,14 +86,28 @@ function passwordHash(password, salt) {
 }
 
 function publicUser(user) {
-  return { id: user.id, name: user.name, email: user.email, plan: user.plan || 'development', subscription: user.subscription || { plan: user.plan || 'development', status: 'development', startedAt: user.createdAt, autoRenew: false }, payments: user.payments || [], createdAt: user.createdAt };
+  return { id: user.id, name: user.name, email: user.email, role: user.role || 'user', status: user.status || 'active', plan: user.plan || 'development', subscription: user.subscription || { plan: user.plan || 'development', status: 'development', startedAt: user.createdAt, autoRenew: false }, payments: user.payments || [], createdAt: user.createdAt, lastSeenAt: user.lastSeenAt || null };
+}
+
+function adminUser(user) {
+  return { ...publicUser(user), connected: Boolean(user.lastSeenAt && Date.now() - new Date(user.lastSeenAt).getTime() < 5 * 60000) };
 }
 
 function authUser(req) {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const session = authSessions.get(token);
   if (!session || session.expiresAt < Date.now()) { authSessions.delete(token); return null; }
-  return readUsers().find(user => user.id === session.userId) || null;
+  const user = readUsers().find(user => user.id === session.userId) || null;
+  return user && (user.status || 'active') === 'active' ? user : null;
+}
+
+function requireAdmin(req) {
+  const user = authUser(req);
+  return user?.role === 'admin' ? user : null;
+}
+
+function revokeUserSessions(userId) {
+  for (const [token, session] of authSessions) if (session.userId === userId) authSessions.delete(token);
 }
 
 function createAuthSession(user) {
@@ -203,7 +227,7 @@ const server = http.createServer(async (req, res) => {
       if (users.some(user => user.email === email)) return send(res, 409, 'application/json; charset=utf-8', JSON.stringify({ error: 'Un compte utilise déjà cet e-mail.' }));
       const salt = crypto.randomBytes(16).toString('hex');
       const createdAt = new Date().toISOString();
-      const user = { id: randomString(16), name, email, salt, passwordHash: passwordHash(password, salt), plan: 'development', subscription: { plan: 'development', status: 'development', startedAt: createdAt, autoRenew: false }, payments: [], createdAt };
+      const user = { id: randomString(16), name, email, salt, passwordHash: passwordHash(password, salt), role: users.length === 0 ? 'admin' : 'user', status: 'active', plan: 'development', subscription: { plan: 'development', status: 'development', startedAt: createdAt, autoRenew: false }, payments: [], createdAt, lastSeenAt: createdAt };
       users.push(user); writeUsers(users);
       return send(res, 201, 'application/json; charset=utf-8', JSON.stringify({ token: createAuthSession(user), user: publicUser(user) }));
     } catch { return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Données invalides.' })); }
@@ -217,13 +241,50 @@ const server = http.createServer(async (req, res) => {
       const user = readUsers().find(item => item.email === email);
       const valid = user && crypto.timingSafeEqual(Buffer.from(passwordHash(password, user.salt), 'hex'), Buffer.from(user.passwordHash, 'hex'));
       if (!valid) return send(res, 401, 'application/json; charset=utf-8', JSON.stringify({ error: 'E-mail ou mot de passe incorrect.' }));
+      if (user.status === 'blocked') return send(res, 403, 'application/json; charset=utf-8', JSON.stringify({ error: 'Ce compte est bloqué.' }));
+      if (user.status === 'suspended') return send(res, 403, 'application/json; charset=utf-8', JSON.stringify({ error: 'Ce compte est temporairement suspendu.' }));
       return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ token: createAuthSession(user), user: publicUser(user) }));
     } catch { return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Connexion impossible.' })); }
   }
 
   if (req.method === 'GET' && url.pathname === '/api/auth/me') {
     const user = authUser(req);
-    return user ? send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ user: publicUser(user) })) : send(res, 401, 'application/json; charset=utf-8', JSON.stringify({ error: 'Session expirée.' }));
+    if (!user) return send(res, 401, 'application/json; charset=utf-8', JSON.stringify({ error: 'Session expirée ou compte désactivé.' }));
+    const users = readUsers(); const stored = users.find(item => item.id === user.id);
+    if (stored && (!stored.lastSeenAt || Date.now() - new Date(stored.lastSeenAt).getTime() > 30000)) { stored.lastSeenAt = new Date().toISOString(); writeUsers(users); }
+    return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ user: publicUser(stored || user) }));
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/admin/users') {
+    if (!requireAdmin(req)) return send(res, 403, 'application/json; charset=utf-8', JSON.stringify({ error: 'Accès administrateur requis.' }));
+    const users = readUsers(); const list = users.map(adminUser);
+    const stats = { total: list.length, connected: list.filter(user => user.connected).length, active: list.filter(user => user.status === 'active').length, suspended: list.filter(user => user.status === 'suspended').length, blocked: list.filter(user => user.status === 'blocked').length, paid: list.filter(user => user.plan === 'pro').length };
+    return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ stats, users: list }));
+  }
+
+  const adminUserMatch = url.pathname.match(/^\/api\/admin\/users\/([A-Za-z0-9_-]+)$/);
+  if (req.method === 'PATCH' && adminUserMatch) {
+    const administrator = requireAdmin(req);
+    if (!administrator) return send(res, 403, 'application/json; charset=utf-8', JSON.stringify({ error: 'Accès administrateur requis.' }));
+    try {
+      const body = await jsonBody(req); const users = readUsers(); const target = users.find(user => user.id === adminUserMatch[1]);
+      if (!target) return send(res, 404, 'application/json; charset=utf-8', JSON.stringify({ error: 'Utilisateur introuvable.' }));
+      if (body.status && !['active', 'suspended', 'blocked'].includes(body.status)) return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'État invalide.' }));
+      if (target.id === administrator.id && body.status && body.status !== 'active') return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Tu ne peux pas désactiver ton propre compte administrateur.' }));
+      if (body.status) { target.status = body.status; if (body.status !== 'active') revokeUserSessions(target.id); }
+      if (body.plan) {
+        if (!['development', 'free', 'pro'].includes(body.plan)) return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Offre invalide.' }));
+        const months = Number(body.durationMonths || 0); target.plan = body.plan;
+        if (body.plan === 'development') target.subscription = { plan: body.plan, status: 'development', startedAt: target.subscription?.startedAt || new Date().toISOString(), autoRenew: false };
+        else {
+          const start = new Date(); const end = new Date(start);
+          if (months > 0) end.setMonth(end.getMonth() + Math.min(months, 36));
+          target.subscription = { plan: body.plan, status: 'active', startedAt: start.toISOString(), endsAt: months > 0 ? end.toISOString() : undefined, autoRenew: false };
+        }
+      }
+      target.updatedAt = new Date().toISOString(); writeUsers(users);
+      return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ user: adminUser(target) }));
+    } catch { return send(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Modification impossible.' })); }
   }
 
   if (req.method === 'POST' && url.pathname === '/api/auth/logout') {

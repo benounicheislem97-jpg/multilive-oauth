@@ -18,6 +18,8 @@ const META_CONFIG_FILE = path.join(PRIVATE_DIR, 'meta-oauth-config.json');
 const META_TOKEN_FILE = path.join(PRIVATE_DIR, 'meta-oauth-tokens.json');
 const USERS_FILE = path.join(PRIVATE_DIR, 'multilive-users.json');
 const ADMIN_EMAILS = new Set(String(process.env.ADMIN_EMAILS || '').split(',').map(email => email.trim().toLowerCase()).filter(Boolean));
+const ADMIN_BOOTSTRAP_SALT = String(process.env.ADMIN_BOOTSTRAP_SALT || '');
+const ADMIN_BOOTSTRAP_HASH = String(process.env.ADMIN_BOOTSTRAP_HASH || '');
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${PORT}`).replace(/\/$/, '');
 const REDIRECT_URI = process.env.TIKTOK_REDIRECT_URI || `${PUBLIC_BASE_URL}/auth/tiktok/callback/`;
 const META_REDIRECT_URI = `${PUBLIC_BASE_URL}/auth/meta/callback/`;
@@ -66,19 +68,30 @@ async function jsonBody(req) {
   return JSON.parse(body || '{}');
 }
 
+function bootstrapAdmin() {
+  const email = [...ADMIN_EMAILS][0];
+  if (!email || !/^[a-f0-9]{16,128}$/i.test(ADMIN_BOOTSTRAP_SALT) || !/^[a-f0-9]{128}$/i.test(ADMIN_BOOTSTRAP_HASH)) return null;
+  const createdAt = new Date().toISOString();
+  return { id: `admin_${crypto.createHash('sha256').update(email).digest('hex').slice(0, 24)}`, name: process.env.ADMIN_NAME || 'Administrateur', email, salt: ADMIN_BOOTSTRAP_SALT, passwordHash: ADMIN_BOOTSTRAP_HASH, role: 'admin', status: 'active', plan: 'development', subscription: { plan: 'development', status: 'development', startedAt: createdAt, autoRenew: false }, payments: [], createdAt, lastSeenAt: null };
+}
+
 function readUsers() {
-  try {
-    const users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-    let changed = false;
-    users.forEach((user, index) => {
-      const shouldBeAdmin = ADMIN_EMAILS.has(String(user.email).toLowerCase()) || (ADMIN_EMAILS.size === 0 && index === 0);
-      if (user.role !== (shouldBeAdmin ? 'admin' : 'user')) { user.role = shouldBeAdmin ? 'admin' : 'user'; changed = true; }
-      if (!user.status) { user.status = 'active'; changed = true; }
-    });
-    if (users.length && !users.some(user => user.role === 'admin')) { users[0].role = 'admin'; changed = true; }
-    if (changed) writeUsers(users);
-    return users;
-  } catch { return []; }
+  let users;
+  try { users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch { users = []; }
+  if (!Array.isArray(users)) users = [];
+  let changed = false;
+  if (!users.length) {
+    const administrator = bootstrapAdmin();
+    if (administrator) { users.push(administrator); changed = true; }
+  }
+  users.forEach((user, index) => {
+    const shouldBeAdmin = ADMIN_EMAILS.has(String(user.email).toLowerCase()) || (ADMIN_EMAILS.size === 0 && index === 0);
+    if (user.role !== (shouldBeAdmin ? 'admin' : 'user')) { user.role = shouldBeAdmin ? 'admin' : 'user'; changed = true; }
+    if (!user.status) { user.status = 'active'; changed = true; }
+  });
+  if (users.length && !users.some(user => user.role === 'admin')) { users[0].role = 'admin'; changed = true; }
+  if (changed) writeUsers(users);
+  return users;
 }
 
 function writeUsers(users) {
